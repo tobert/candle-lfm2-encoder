@@ -1,0 +1,27 @@
+[package]
+name = "candle-lfm2-encoder"
+version = "0.0.1"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+description = "LiquidAI LFM2.5 bidirectional encoders (embedding, token/sequence classification, routing) on candle — pure Rust, CPU-first"
+keywords = ["lfm2", "candle", "encoder", "embeddings", "classifier"]
+categories = ["science"]
+
+[dependencies]
+candle-core = "0.11"
+candle-nn = "0.11"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+tokenizers = "0.23"
+
+# Model download from the Hub is optional — consumers that ship weights
+# themselves (kaijutsu's model dir convention) never pull this in.
+hf-hub = { version = "1", optional = true }
+
+[features]
+default = []
+hub = ["dep:hf-hub"]
+
+[dev-dependencies]
+anyhow = "1"
