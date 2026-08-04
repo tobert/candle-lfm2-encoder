@@ -152,6 +152,26 @@ fn batched_forward_without_a_mask_is_refused() {
     trunk.forward(&single, None).expect("single row needs no mask");
 }
 
+/// A soft/fractional mask is not something these checkpoints were trained
+/// with; accepting one would silently attenuate keys instead of masking
+/// them. The contract is binary, and enforced.
+#[test]
+fn a_non_binary_attention_mask_is_refused() {
+    let cfg = tiny_config();
+    let trunk = Lfm2Trunk::load(&cfg, vb(tiny_weights(""))).unwrap();
+    let ids = Tensor::new(&[[1u32, 2, 3, 4]], &Device::Cpu).unwrap();
+
+    let soft = Tensor::new(&[[1.0f32, 0.5, 1.0, 0.0]], &Device::Cpu).unwrap();
+    let err = trunk
+        .forward(&ids, Some(&soft))
+        .expect_err("a fractional mask must be refused");
+    assert!(err.to_string().contains("1 (real) or 0 (pad)"), "{err}");
+
+    // The same mask with binary values is accepted.
+    let hard = Tensor::new(&[[1.0f32, 1.0, 1.0, 0.0]], &Device::Cpu).unwrap();
+    trunk.forward(&ids, Some(&hard)).expect("binary f32 mask is fine");
+}
+
 /// `conv_bias` defaults to false when the key is absent, so a checkpoint
 /// that ships a bias would have it silently dropped — a trained parameter
 /// vanishing with no error.

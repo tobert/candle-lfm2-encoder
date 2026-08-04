@@ -177,12 +177,140 @@ impl Attention {
             None => att,
         };
         let att = candle_nn::ops::softmax_last_dim(&att)?;
-        let out = att.matmul(&v.contiguous()?)?.to_dtype(in_dtype)?;
+        // `v` is already contiguous here: to_dtype materializes a fresh
+        // buffer, as does repeat_kv's cat before it.
+        let out = att.matmul(&v)?.to_dtype(in_dtype)?;
 
         let out = out
             .transpose(1, 2)?
             .reshape((b, seq, self.num_heads * self.head_dim))?;
         self.out_proj.forward(&out)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use candle_core::Device;
+    use candle_nn::{Conv1d, Conv1dConfig};
+
+    /// The shifted multiply-add form of the short conv must equal candle's
+    /// grouped `Conv1d` exactly — that equivalence is the whole license for
+    /// replacing it (candle's grouped path costs a flat ~173 ms/call; see
+    /// `examples/bench_ops.rs`). Covers even `k` too, which no shipped
+    /// checkpoint exercises: every one is k=3.
+    #[test]
+    fn depthwise_conv_equals_candle_grouped_conv1d() {
+        let dev = Device::Cpu;
+        let hidden = 24usize;
+
+        for k in [1usize, 2, 3, 4, 5] {
+            for seq in [1usize, 3, 7, 16] {
+                let weight = Tensor::randn(0f32, 1., (hidden, 1, k), &dev).unwrap();
+                let bx = Tensor::randn(0f32, 1., (1, hidden, seq), &dev).unwrap();
+
+                let ours = ShortConv {
+                    // Projections are irrelevant here; depthwise_conv only
+                    // touches the kernel fields.
+                    in_proj: candle_nn::Linear::new(
+                        Tensor::zeros((3 * hidden, hidden), DType::F32, &dev).unwrap(),
+                        None,
+                    ),
+                    out_proj: candle_nn::Linear::new(
+                        Tensor::zeros((hidden, hidden), DType::F32, &dev).unwrap(),
+                        None,
+                    ),
+                    conv_weight: weight.clone(),
+                    conv_bias: None,
+                    kernel: k,
+                    hidden_size: hidden,
+                }
+                .depthwise_conv(&bx, seq)
+                .unwrap();
+
+                let reference = Conv1d::new(
+                    weight,
+                    None,
+                    Conv1dConfig {
+                        padding: k / 2,
+                        groups: hidden,
+                        ..Default::default()
+                    },
+                )
+                .forward(&bx)
+                .unwrap();
+                // Match the upstream trim for even k, which leaves an extra step.
+                let reference = if reference.dim(2).unwrap() > seq {
+                    reference.narrow(2, 0, seq).unwrap()
+                } else {
+                    reference
+                };
+
+                assert_eq!(ours.dims3().unwrap(), (1, hidden, seq), "k={k} seq={seq}");
+                let max_d = (ours - reference)
+                    .unwrap()
+                    .abs()
+                    .unwrap()
+                    .flatten_all()
+                    .unwrap()
+                    .max(0)
+                    .unwrap()
+                    .to_scalar::<f32>()
+                    .unwrap();
+                assert!(max_d < 1e-5, "k={k} seq={seq}: max|Δ| = {max_d:e}");
+            }
+        }
+    }
+
+    /// A bias, when the config declares one, must land the same way.
+    #[test]
+    fn depthwise_conv_applies_bias_like_conv1d() {
+        let dev = Device::Cpu;
+        let (hidden, k, seq) = (16usize, 3usize, 9usize);
+        let weight = Tensor::randn(0f32, 1., (hidden, 1, k), &dev).unwrap();
+        let bias = Tensor::randn(0f32, 1., hidden, &dev).unwrap();
+        let bx = Tensor::randn(0f32, 1., (1, hidden, seq), &dev).unwrap();
+
+        let ours = ShortConv {
+            in_proj: candle_nn::Linear::new(
+                Tensor::zeros((3 * hidden, hidden), DType::F32, &dev).unwrap(),
+                None,
+            ),
+            out_proj: candle_nn::Linear::new(
+                Tensor::zeros((hidden, hidden), DType::F32, &dev).unwrap(),
+                None,
+            ),
+            conv_weight: weight.clone(),
+            conv_bias: Some(bias.clone()),
+            kernel: k,
+            hidden_size: hidden,
+        }
+        .depthwise_conv(&bx, seq)
+        .unwrap();
+
+        let reference = Conv1d::new(
+            weight,
+            Some(bias),
+            Conv1dConfig {
+                padding: k / 2,
+                groups: hidden,
+                ..Default::default()
+            },
+        )
+        .forward(&bx)
+        .unwrap();
+
+        let max_d = (ours - reference)
+            .unwrap()
+            .abs()
+            .unwrap()
+            .flatten_all()
+            .unwrap()
+            .max(0)
+            .unwrap()
+            .to_scalar::<f32>()
+            .unwrap();
+        assert!(max_d < 1e-5, "max|Δ| = {max_d:e}");
     }
 }
 
@@ -458,7 +586,25 @@ impl Lfm2Trunk {
     fn additive_mask(pad_mask: &Tensor) -> Result<Tensor> {
         let (b, seq) = pad_mask.dims2()?;
         let keep = pad_mask.to_dtype(DType::F32)?;
+
+        // The contract is 1 = real, 0 = pad. A fractional mask would sail
+        // through as a soft mask the model was never trained for, so check
+        // it: keep*(keep-1) is exactly zero iff every value is 0 or 1. Two
+        // tiny ops on (batch, seq) — nothing next to the forward pass.
         let ones = Tensor::ones((b, seq), DType::F32, keep.device())?;
+        let off_binary = (&keep * (&keep - &ones)?)?
+            .abs()?
+            .flatten_all()?
+            .max(0)?
+            .to_scalar::<f32>()?;
+        if off_binary != 0.0 {
+            return Err(candle_core::Error::Msg(format!(
+                "attention_mask must be 1 (real) or 0 (pad); found a value that is \
+                 neither (off-binary residual {off_binary:e}). A soft mask is not \
+                 something these checkpoints were trained with."
+            )));
+        }
+
         ((ones - keep)? * MASK_NEG)?.reshape((b, 1, 1, seq))
     }
 
