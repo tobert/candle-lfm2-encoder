@@ -88,6 +88,71 @@ fn rope_theta_resolves_across_both_config_forms() {
     }
 }
 
+/// The Policy-Linter ships a FIFTH architecture name,
+/// `Lfm2BidirForRuleMatching`, which the original substring cascade
+/// swallowed into `BidirectionalModel` via the bare `Bidir` arm — a
+/// rule-matching checkpoint would have loaded as a headless trunk and
+/// silently dropped its head. Structurally it is the Policy-Linter twin of
+/// the Router: a `rule_proj_dim` scorer, no `id2label`.
+#[test]
+fn policy_linter_is_rule_matching_not_a_bare_trunk() {
+    let cfg = fixture("LFM2.5-Encoder-350M-Policy-Linter");
+    assert_eq!(cfg.arch(), EncoderArch::RuleMatching);
+    assert_eq!(cfg.rule_proj_dim, Some(256));
+    assert!(cfg.num_labels().is_none(), "rule matching is zero-shot, not a label set");
+}
+
+/// The family is wider than the four checkpoints day 0 knew about. Every
+/// fixture must land on a NAMED arch — `Unknown` here means LiquidAI
+/// shipped a shape we haven't read yet, and we want that loud.
+#[test]
+fn every_family_fixture_resolves_to_a_known_arch() {
+    for name in [
+        "LFM2.5-Embedding-350M",
+        "LFM2.5-Encoder-230M",
+        "LFM2.5-Encoder-350M",
+        "LFM2.5-Encoder-350M-PII-Detector",
+        "LFM2.5-Encoder-350M-Prompt-Router",
+        "LFM2.5-Encoder-350M-Policy-Linter",
+        "LFM2.5-ColBERT-350M",
+    ] {
+        let cfg = fixture(name);
+        assert!(
+            !matches!(cfg.arch(), EncoderArch::Unknown(_)),
+            "{name}: unrecognized architecture {:?} — read its modeling code before guessing a head",
+            cfg.architectures.first()
+        );
+        assert_eq!(cfg.hidden_size, 1024, "{name}");
+        assert_eq!(cfg.head_dim(), 64, "{name}");
+    }
+}
+
+/// The FFN width is NOT `intermediate_size` — that key disagrees with the
+/// shipped weights on three of four checkpoints. These expectations are the
+/// real `feed_forward.w1.weight` out-features, read out of each
+/// checkpoint's safetensors header on 2026-08-04. Do not "fix" them to
+/// match config.json; config.json is the thing that's wrong.
+#[test]
+fn ffn_dim_matches_the_shipped_weights_not_the_config_key() {
+    for (name, real_w1_out, config_says) in [
+        ("LFM2.5-Embedding-350M", 4608, 6656),
+        ("LFM2.5-Encoder-230M", 2560, 2560),
+        ("LFM2.5-Encoder-350M-PII-Detector", 4608, 6656),
+        ("LFM2.5-Encoder-350M-Prompt-Router", 4608, 6656),
+    ] {
+        let cfg = fixture(name);
+        assert_eq!(
+            cfg.intermediate_size, config_says,
+            "{name}: raw config key drifted; the fixture changed under us"
+        );
+        assert_eq!(
+            cfg.ffn_dim(),
+            real_w1_out,
+            "{name}: ffn_dim() must reproduce feed_forward.w1's out-features"
+        );
+    }
+}
+
 #[test]
 fn validate_catches_a_truncated_layer_list() {
     let mut cfg = fixture("LFM2.5-Embedding-350M");

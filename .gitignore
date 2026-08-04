@@ -1,4 +1,7 @@
 /target
 
+# downloaded checkpoints — hundreds of MB, fetched with `hf download`
+/.models
+
 # ephemeral working notes — never committed (see CLAUDE.md conventions)
 /signoff.md

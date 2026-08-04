@@ -51,6 +51,11 @@ pub enum EncoderArch {
     /// Sequence-routing head (the Prompt-Router: scores a prompt against
     /// rule projections — `rule_proj_dim` — not a fixed label head).
     SequenceRouting,
+    /// Token-level rule-matching head (the Policy-Linter): scores every
+    /// token against free-text rule projections. Same `rule_proj_dim`
+    /// machinery as [`EncoderArch::SequenceRouting`], but per-token rather
+    /// than per-sequence.
+    RuleMatching,
     /// Plain sequence-classification head (none shipped yet; anticipated).
     SequenceClassification,
     /// Anything we don't recognize — carried verbatim so the caller can
@@ -72,7 +77,21 @@ pub struct Lfm2EncoderConfig {
     pub norm_eps: f64,
     pub layer_types: Vec<LayerType>,
     pub max_position_embeddings: usize,
-    pub intermediate_size: Option<usize>,
+    /// The config's *nominal* FFN width. Do not build an MLP from this —
+    /// it disagrees with the shipped weights on three of four checkpoints.
+    /// Use [`Lfm2EncoderConfig::ffn_dim`].
+    pub intermediate_size: usize,
+    /// Present only on the Embedding checkpoint; when present it, not
+    /// `intermediate_size`, is the FFN base width.
+    block_ff_dim: Option<usize>,
+    /// When set, the base width is Llama-style two-thirds-adjusted before
+    /// rounding. Absent on the 230M base, which uses its width verbatim.
+    #[serde(default)]
+    block_auto_adjust_ff_dim: bool,
+    #[serde(default = "default_ffn_dim_multiplier")]
+    block_ffn_dim_multiplier: f64,
+    #[serde(default = "default_block_multiple_of")]
+    block_multiple_of: usize,
     /// Short-conv kernel/cache length (`conv_L_cache` upstream).
     #[serde(rename = "conv_L_cache")]
     pub conv_l_cache: usize,
@@ -103,6 +122,14 @@ fn default_norm_eps() -> f64 {
     1e-5
 }
 
+fn default_ffn_dim_multiplier() -> f64 {
+    1.0
+}
+
+fn default_block_multiple_of() -> usize {
+    256
+}
+
 /// LFM2's documented RoPE default when neither config form carries one.
 const DEFAULT_ROPE_THETA: f64 = 1_000_000.0;
 
@@ -117,15 +144,26 @@ impl Lfm2EncoderConfig {
         let Some(name) = self.architectures.first() else {
             return EncoderArch::Unknown(String::new());
         };
-        // Order matters: more specific suffixes first.
+        // Order matters: every `For…` head must be tested BEFORE the bare
+        // `Bidir` fallback, or a head-carrying checkpoint gets misread as a
+        // headless trunk and quietly loses its head. That is exactly how
+        // `Lfm2BidirForRuleMatching` (Policy-Linter) slipped through on day
+        // 0 — hence the belt-and-braces guard below.
         if name.contains("ForTokenClassification") {
             EncoderArch::TokenClassification
         } else if name.contains("ForSequenceRouting") {
             EncoderArch::SequenceRouting
+        } else if name.contains("ForRuleMatching") {
+            EncoderArch::RuleMatching
         } else if name.contains("ForSequenceClassification") {
             EncoderArch::SequenceClassification
         } else if name.contains("ForMaskedLM") {
             EncoderArch::MaskedLm
+        } else if name.contains("For") {
+            // A head we've never seen. Refuse to guess: report it verbatim
+            // so the caller fails with a name to go read on the Hub,
+            // instead of loading a trunk and dropping the head.
+            EncoderArch::Unknown(name.clone())
         } else if name.contains("Bidirectional") || name.contains("Bidir") {
             EncoderArch::BidirectionalModel
         } else {
@@ -139,6 +177,41 @@ impl Lfm2EncoderConfig {
         self.rope_theta
             .or(self.rope_parameters.as_ref().and_then(|r| r.rope_theta))
             .unwrap_or(DEFAULT_ROPE_THETA)
+    }
+
+    /// Per-head width. LFM2 derives it rather than shipping it.
+    pub fn head_dim(&self) -> usize {
+        self.hidden_size / self.num_attention_heads
+    }
+
+    /// The FFN width the *weights* actually have.
+    ///
+    /// `intermediate_size` in config.json is the pre-adjustment nominal
+    /// width and is wrong on three of the four checkpoints (Embedding, PII,
+    /// Router all say 6656 while shipping 4608). LiquidAI applies the
+    /// Llama-style two-thirds adjustment and rounds up to
+    /// `block_multiple_of`:
+    ///
+    /// ```text
+    /// base = block_ff_dim ?? intermediate_size
+    /// if block_auto_adjust_ff_dim { base = 2*base/3 }
+    /// round_up(base * block_ffn_dim_multiplier, block_multiple_of)
+    /// ```
+    ///
+    /// Verified against every checkpoint's `feed_forward.w1.weight`
+    /// out-features (safetensors headers, 2026-08-04) — see the fixture
+    /// test. Note this differs from candle-transformers' causal
+    /// `compute_intermediate_size`, which starts from `hidden_size * 4` and
+    /// would yield 4096 here.
+    pub fn ffn_dim(&self) -> usize {
+        let base = self.block_ff_dim.unwrap_or(self.intermediate_size);
+        let base = if self.block_auto_adjust_ff_dim {
+            2 * base / 3
+        } else {
+            base
+        };
+        let scaled = (base as f64 * self.block_ffn_dim_multiplier) as usize;
+        scaled.div_ceil(self.block_multiple_of) * self.block_multiple_of
     }
 
     /// Number of classification labels, when this checkpoint has a label

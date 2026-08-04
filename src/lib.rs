@@ -11,9 +11,11 @@
 //!
 //! 1. **Config** (done): parse every family checkpoint's `config.json`,
 //!    verified against real fixtures; head detection via [`config::EncoderArch`].
-//! 2. **Trunk**: the bidirectional hybrid stack — adapt the block
-//!    implementations from candle-transformers' `lfm2.rs` (MIT/Apache-2.0,
-//!    attribution retained), minus the causal mask and KV cache.
+//! 2. **Trunk** (done): the bidirectional hybrid stack ([`Lfm2Trunk`]) —
+//!    blocks adapted from candle-transformers' `lfm2.rs` (MIT/Apache-2.0,
+//!    attribution retained), minus the causal mask and KV cache, plus the
+//!    encoder branch's *centered* short conv. Verified to max|Δ| ≈ 5e-5
+//!    against the checkpoint's own Python modeling code.
 //! 3. **Heads**, in order of use: pooled embedding (`Embedding-350M`),
 //!    token classification (`PII-Detector`, `Policy-Linter`), sequence
 //!    routing (`Prompt-Router` — rule-projection scoring, see its
@@ -28,5 +30,7 @@
 //! [candle]: https://github.com/huggingface/candle
 
 pub mod config;
+pub mod trunk;
 
 pub use config::{EncoderArch, LayerType, Lfm2EncoderConfig};
+pub use trunk::Lfm2Trunk;
