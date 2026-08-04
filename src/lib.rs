@@ -43,6 +43,8 @@ pub mod config;
 pub mod colbert;
 pub mod embedding;
 pub mod error;
+mod labels;
+pub mod sequence_classification;
 pub mod token_classification;
 pub mod trunk;
 
@@ -50,5 +52,6 @@ pub use config::{EncoderArch, LayerType, Lfm2EncoderConfig};
 pub use colbert::{ColbertModel, MultiVector};
 pub use embedding::{cosine_similarity, Lfm2Embedding, TextKind};
 pub use error::{Error, Result};
+pub use sequence_classification::Lfm2SequenceClassifier;
 pub use token_classification::{Lfm2TokenClassifier, Span};
 pub use trunk::Lfm2Trunk;

@@ -25,6 +25,11 @@ hub = ["dep:hf-hub"]
 
 [dev-dependencies]
 anyhow = "1"
+# For building a synthetic tokenizer.json in tests/sequence_classification_guards.rs
+# (WordLevel's vocab builder wants tokenizers' own hasher). Already in the
+# dependency tree transitively via tokenizers itself.
+ahash = "0.8"
+tempfile = "3"
 
 # Optimize DEPENDENCIES in debug/test builds while our own crate stays
 # unoptimized and debuggable. candle does the arithmetic; without this a

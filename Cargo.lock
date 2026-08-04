@@ -258,12 +258,14 @@ dependencies = [
 name = "candle-lfm2-encoder"
 version = "0.0.1"
 dependencies = [
+ "ahash",
  "anyhow",
  "candle-core",
  "candle-nn",
  "hf-hub",
  "serde",
  "serde_json",
+ "tempfile",
  "thiserror 2.0.19",
  "tokenizers 0.23.1",
 ]

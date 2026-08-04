@@ -24,7 +24,6 @@
 //! `credential.connection_string` this head gets right). Consumers who
 //! want it should port it deliberately, with that trade in view.
 
-use std::collections::HashMap;
 use std::path::Path;
 
 use candle_core::{DType, Device, IndexOp, Module, Tensor};
@@ -33,6 +32,7 @@ use tokenizers::Tokenizer;
 
 use crate::config::Lfm2EncoderConfig;
 use crate::error::{Error, Result};
+use crate::labels::order_labels;
 use crate::trunk::Lfm2Trunk;
 
 /// A detected entity, with byte offsets into the input string.
@@ -232,32 +232,4 @@ impl Lfm2TokenClassifier {
             .filter(|s| s.label.starts_with("credential."))
             .collect())
     }
-}
-
-/// Turn `{"0": "O", "1": "B-x", …}` into a dense id-ordered vector, failing
-/// loudly on a gap rather than leaving a silently-wrong label at that id.
-fn order_labels(map: &HashMap<String, String>, path: &Path) -> Result<Vec<String>> {
-    let mut out = vec![None; map.len()];
-    for (k, v) in map {
-        let id: usize = k.parse().map_err(|_| Error::ConfigInvalid {
-            path: path.to_path_buf(),
-            message: format!("id2label key {k:?} is not an integer"),
-        })?;
-        if id >= out.len() {
-            return Err(Error::ConfigInvalid {
-                path: path.to_path_buf(),
-                message: format!("id2label id {id} is out of range for {} labels", map.len()),
-            });
-        }
-        out[id] = Some(v.clone());
-    }
-    out.into_iter()
-        .enumerate()
-        .map(|(i, l)| {
-            l.ok_or_else(|| Error::ConfigInvalid {
-                path: path.to_path_buf(),
-                message: format!("id2label has no entry for id {i}"),
-            })
-        })
-        .collect()
 }

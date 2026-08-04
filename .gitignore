@@ -5,3 +5,10 @@
 
 # ephemeral working notes — never committed (see CLAUDE.md conventions)
 /signoff.md
+
+# Training data NEVER lives in the repo. It is quarantined outside the tree
+# at ~/.local/share/lfm2-training-data (mode 0700, no exec bit on files),
+# handled only by scripts, and never read into an agent's context.
+/data
+/training/data
+*.jsonl
