@@ -1,0 +1,1108 @@
+{
+  "description": "Synthetic evaluation fixtures for LFM2.5-Encoder-350M-PII-Detector, shaped around kaibo's boundary-guard use case: scanning text read from foreign repositories and outbound batch payloads for credentials and personal data before they reach a third-party model API.",
+  "generated": "2026-08-04",
+  "warning": "All values in this file are synthetic and non-functional (fake API keys, RFC 5737/2606 documentation addresses, 555-01xx reserved phone numbers, truncated placeholder PEM key material). No value here is a real credential or real personal data. See tests/data/pii_detection_eval.json header and candle-lfm2-encoder/CLAUDE.md for provenance.",
+  "label_source": "tests/fixtures/LFM2.5-Encoder-350M-PII-Detector.config.json id2label (BIOES over 40 entity types, 161 labels)",
+  "categories": {
+    "leaked-credential": "Text where a real (synthetic-but-structurally-valid) secret is present and MUST be caught before shipping outbound.",
+    "personal-data": "Text containing non-credential PII (names, contact info, financial, healthcare, identity, special-category attributes).",
+    "clean": "Text that superficially resembles a leak (placeholder, doc prose, public key, hash, UUID) but contains no real entity — false-positive guard.",
+    "tricky-negative": "Structurally credential-shaped text that is redacted, templated, or otherwise non-exploitable — probes context sensitivity."
+  },
+  "cases": [
+    {
+      "id": "c001",
+      "text": "const stripeKey = \"sk-test-000000000000000000000000\";\nawait charge(stripeKey, amount);",
+      "category": "leaked-credential",
+      "expected_entities": [
+        {
+          "type": "credential.api_key",
+          "span": "sk-test-000000000000000000000000"
+        }
+      ],
+      "note": "Hardcoded API key literal assigned to a variable in JS source."
+    },
+    {
+      "id": "c002",
+      "text": "STRIPE_API_KEY=sk_test_FAKE1234567890abcdefghijklmnop\nSTRIPE_WEBHOOK_SECRET=whsec_FAKEabc0000000000000000000000",
+      "category": "leaked-credential",
+      "expected_entities": [
+        {
+          "type": "credential.api_key",
+          "span": "sk_test_FAKE1234567890abcdefghijklmnop"
+        },
+        {
+          "type": "credential.api_key",
+          "span": "whsec_FAKEabc0000000000000000000000"
+        }
+      ],
+      "note": ".env fragment with two distinct API key style secrets, exactly what kaibo scans in dotfiles."
+    },
+    {
+      "id": "c003",
+      "text": "AWS_ACCESS_KEY_ID=AKIAFAKE00000000EXAM\nAWS_SECRET_ACCESS_KEY=faKE0000000000000000000000000000000000",
+      "category": "leaked-credential",
+      "expected_entities": [
+        {
+          "type": "credential.api_key",
+          "span": "AKIAFAKE00000000EXAM"
+        },
+        {
+          "type": "credential.api_key",
+          "span": "faKE0000000000000000000000000000000000"
+        }
+      ],
+      "note": "AWS-style access key pair in .env; both id and secret are credential material."
+    },
+    {
+      "id": "c004",
+      "text": "headers = {\"Authorization\": \"Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4gRG9lIn0.FAKEsig000000000000000000000000000\"}",
+      "category": "leaked-credential",
+      "expected_entities": [
+        {
+          "type": "credential.jwt",
+          "span": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4gRG9lIn0.FAKEsig000000000000000000000000000"
+        }
+      ],
+      "note": "JWT bearer token embedded in a Python requests headers dict."
+    },
+    {
+      "id": "c005",
+      "text": "2026-08-04T09:12:03Z WARN auth: rejected stale token Authorization: Bearer eyJhbGciOiJSUzI1NiJ9.eyJpc3MiOiJmYWtlLWlzc3VlciJ9.FAKEbadsig00000000000000000000",
+      "category": "leaked-credential",
+      "expected_entities": [
+        {
+          "type": "credential.jwt",
+          "span": "eyJhbGciOiJSUzI1NiJ9.eyJpc3MiOiJmYWtlLWlzc3VlciJ9.FAKEbadsig00000000000000000000"
+        }
+      ],
+      "note": "JWT captured verbatim in a service log line — logs are a common kaibo scan target."
+    },
+    {
+      "id": "c006",
+      "text": "-----BEGIN RSA PRIVATE KEY-----\nMIIEowIBAAKCAQEAFAKEfakefakefakefakefakefakefakefakefakefakefake\nTRUNCATED-FAKE-KEY-MATERIAL-DO-NOT-USE\n-----END RSA PRIVATE KEY-----",
+      "category": "leaked-credential",
+      "expected_entities": [
+        {
+          "type": "credential.private_key",
+          "span": "-----BEGIN RSA PRIVATE KEY-----\nMIIEowIBAAKCAQEAFAKEfakefakefakefakefakefakefakefakefakefakefake\nTRUNCATED-FAKE-KEY-MATERIAL-DO-NOT-USE\n-----END RSA PRIVATE KEY-----"
+        }
+      ],
+      "note": "Full PEM private key block pasted into an issue/log — highest severity leak class."
+    },
+    {
+      "id": "c007",
+      "text": "deploy.sh copies id_rsa into the image:\ncp -----BEGIN OPENSSH PRIVATE KEY-----\nb3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQAAAAAAAAABAAABFwAAAAdzc2gtcn\nRSAKEY-TRUNCATED-FAKE-DO-NOT-USE\n-----END OPENSSH PRIVATE KEY----- /root/.ssh/",
+      "category": "leaked-credential",
+      "expected_entities": [
+        {
+          "type": "credential.private_key",
+          "span": "-----BEGIN OPENSSH PRIVATE KEY-----\nb3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQAAAAAAAAABAAABFwAAAAdzc2gtcn\nRSAKEY-TRUNCATED-FAKE-DO-NOT-USE\n-----END OPENSSH PRIVATE KEY-----"
+        }
+      ],
+      "note": "OpenSSH private key embedded inline in a shell script, common CI leak pattern."
+    },
+    {
+      "id": "c008",
+      "text": "DATABASE_URL=\"postgres://appuser:CorrectHorseFake1@db.example.com:5432/prod?sslmode=require\"",
+      "category": "leaked-credential",
+      "expected_entities": [
+        {
+          "type": "credential.connection_string",
+          "span": "postgres://appuser:CorrectHorseFake1@db.example.com:5432/prod?sslmode=require"
+        }
+      ],
+      "note": "Postgres connection string with inline password in a docker-compose-style env line."
+    },
+    {
+      "id": "c009",
+      "text": "mongo_uri: mongodb+srv://svc_reader:FakePass9000@cluster0.example.mongodb.net/analytics?retryWrites=true",
+      "category": "leaked-credential",
+      "expected_entities": [
+        {
+          "type": "credential.connection_string",
+          "span": "mongodb+srv://svc_reader:FakePass9000@cluster0.example.mongodb.net/analytics?retryWrites=true"
+        }
+      ],
+      "note": "MongoDB Atlas connection string in a YAML config fragment."
+    },
+    {
+      "id": "c010",
+      "text": "redis.connect('redis://:FakeRedisSecret123@cache.internal.example.com:6379/0')",
+      "category": "leaked-credential",
+      "expected_entities": [
+        {
+          "type": "credential.connection_string",
+          "span": "redis://:FakeRedisSecret123@cache.internal.example.com:6379/0"
+        }
+      ],
+      "note": "Redis URI with password-only auth embedded in a Python call."
+    },
+    {
+      "id": "c011",
+      "text": "Traceback (most recent call last):\n  sqlalchemy.exc.OperationalError: could not connect to server: mysql://root:FakeRootPW2026@10.0.0.5:3306/billing",
+      "category": "leaked-credential",
+      "expected_entities": [
+        {
+          "type": "credential.connection_string",
+          "span": "mysql://root:FakeRootPW2026@10.0.0.5:3306/billing"
+        }
+      ],
+      "note": "Connection string leaked inside a stack trace pasted into a bug report."
+    },
+    {
+      "id": "c012",
+      "text": "smtp:\n  host: smtp.example.com\n  user: notifier@example.com\n  password: N0tifyFakeSecret!",
+      "category": "leaked-credential",
+      "expected_entities": [
+        {
+          "type": "credential.password",
+          "span": "N0tifyFakeSecret!"
+        }
+      ],
+      "note": "Plaintext password value under a YAML smtp config block."
+    },
+    {
+      "id": "c013",
+      "text": "admin console reset: new temporary password for root is Tr0ub4dor&FakeTmp, rotate on first login",
+      "category": "leaked-credential",
+      "expected_entities": [
+        {
+          "type": "credential.password",
+          "span": "Tr0ub4dor&FakeTmp"
+        }
+      ],
+      "note": "Temporary password disclosed in an ops runbook / chat message."
+    },
+    {
+      "id": "c014",
+      "text": "curl -u svc_ingest:IngestFakeSecret42 https://api.example.com/v2/upload",
+      "category": "leaked-credential",
+      "expected_entities": [
+        {
+          "type": "developer.login_credentials",
+          "span": "svc_ingest:IngestFakeSecret42"
+        }
+      ],
+      "note": "Basic-auth username:password pair passed on a shell command line."
+    },
+    {
+      "id": "c015",
+      "text": "ftp_login = FtpAccount(username='release_bot', password='ReleaseBotFake!9')\nftp_login.connect('ftp.example.com')",
+      "category": "leaked-credential",
+      "expected_entities": [
+        {
+          "type": "credential.password",
+          "span": "ReleaseBotFake!9"
+        }
+      ],
+      "note": "Password literal inside a constructor call in Python source."
+    },
+    {
+      "id": "c016",
+      "text": "diff --git a/config/secrets.yaml b/config/secrets.yaml\n+  github_token: \"ghp_FAKE0000000000000000000000000000\"\n-  github_token: \"<REMOVED>\"",
+      "category": "leaked-credential",
+      "expected_entities": [
+        {
+          "type": "credential.api_key",
+          "span": "ghp_FAKE0000000000000000000000000000"
+        }
+      ],
+      "note": "Git diff hunk that ADDS a real-looking token (the added line is the leak); the removed placeholder line is not."
+    },
+    {
+      "id": "c017",
+      "text": "npm ERR! request to https://registry.example.com/ failed, reason: authentication token expired for header Authorization: Bearer sk-npm-000000000000000000000000fake",
+      "category": "leaked-credential",
+      "expected_entities": [
+        {
+          "type": "credential.api_key",
+          "span": "sk-npm-000000000000000000000000fake"
+        }
+      ],
+      "note": "Package manager error log leaking a bearer token verbatim."
+    },
+    {
+      "id": "c018",
+      "text": "SLACK_WEBHOOK_URL=https://hooks.example.com/services/T00000FAKE/B00000FAKE/abcdefghijklmnopqrstuvwx",
+      "category": "leaked-credential",
+      "expected_entities": [
+        {
+          "type": "credential.api_key",
+          "span": "https://hooks.example.com/services/T00000FAKE/B00000FAKE/abcdefghijklmnopqrstuvwx"
+        }
+      ],
+      "note": "Slack incoming webhook URL functions as a bearer credential; treated as an API-key-class secret."
+    },
+    {
+      "id": "c019",
+      "text": "kubectl create secret generic db-creds --from-literal=connection='Server=db.example.com;Database=prod;User Id=svc;Password=SvcFakePW77;'",
+      "category": "leaked-credential",
+      "expected_entities": [
+        {
+          "type": "credential.connection_string",
+          "span": "Server=db.example.com;Database=prod;User Id=svc;Password=SvcFakePW77;"
+        }
+      ],
+      "note": "ADO.NET-style connection string passed as a literal in a kubectl command."
+    },
+    {
+      "id": "c020",
+      "text": "eyJhbGciOiJIUzI1NiJ9.eyJ1c2VyIjoiYWRtaW4iLCJleHAiOjE5OTk5OTk5OTl9.fakeSignatureValueDoNotUse00 -- pasted from browser devtools localStorage",
+      "category": "leaked-credential",
+      "expected_entities": [
+        {
+          "type": "credential.jwt",
+          "span": "eyJhbGciOiJIUzI1NiJ9.eyJ1c2VyIjoiYWRtaW4iLCJleHAiOjE5OTk5OTk5OTl9.fakeSignatureValueDoNotUse00"
+        }
+      ],
+      "note": "JWT copy-pasted from a browser devtools session into a bug report."
+    },
+    {
+      "id": "c021",
+      "text": "PGPASSWORD=StagingFakePW2026 psql -h staging-db.example.com -U readonly -d reports",
+      "category": "leaked-credential",
+      "expected_entities": [
+        {
+          "type": "credential.password",
+          "span": "StagingFakePW2026"
+        }
+      ],
+      "note": "Password passed via env var prefix on an inline shell invocation."
+    },
+    {
+      "id": "c022",
+      "text": "config/wallet.json: {\"private_key\": \"5JFakeWifKeyDoNotUse0000000000000000000000000\", \"label\": \"cold-storage\"}",
+      "category": "leaked-credential",
+      "expected_entities": [
+        {
+          "type": "credential.private_key",
+          "span": "5JFakeWifKeyDoNotUse0000000000000000000000000"
+        }
+      ],
+      "note": "Crypto wallet private key (WIF-style) stored in a JSON config fragment."
+    },
+    {
+      "id": "p001",
+      "text": "Reported by Jane A. Doherty (jane.doherty@example.com) via the support portal.",
+      "category": "personal-data",
+      "expected_entities": [
+        {
+          "type": "identity.person_name",
+          "span": "Jane A. Doherty"
+        },
+        {
+          "type": "contact.email",
+          "span": "jane.doherty@example.com"
+        }
+      ],
+      "note": "Issue-tracker style attribution line pairing a full name with an email address."
+    },
+    {
+      "id": "p002",
+      "text": "Please call the customer back at 555-0142 to confirm the return address, 1200 Meridian Ave, Springfield, 62704.",
+      "category": "personal-data",
+      "expected_entities": [
+        {
+          "type": "contact.phone",
+          "span": "555-0142"
+        },
+        {
+          "type": "contact.address",
+          "span": "1200 Meridian Ave, Springfield"
+        },
+        {
+          "type": "contact.postal_code",
+          "span": "62704"
+        }
+      ],
+      "note": "Support note with a reserved 555-01xx phone number plus a mailing address and ZIP."
+    },
+    {
+      "id": "p003",
+      "text": "Client SSN on file: 078-05-1120, DOB 1990-03-14, for the loan application.",
+      "category": "personal-data",
+      "expected_entities": [
+        {
+          "type": "identity.ssn",
+          "span": "078-05-1120"
+        },
+        {
+          "type": "identity.date_of_birth",
+          "span": "1990-03-14"
+        }
+      ],
+      "note": "Social Security Number alongside date of birth in a financial intake form dump."
+    },
+    {
+      "id": "p004",
+      "text": "Passport number P00FAKE123 was scanned at check-in; driver's license D1234-5678-FAKE-9 kept on file as backup ID.",
+      "category": "personal-data",
+      "expected_entities": [
+        {
+          "type": "identity.passport",
+          "span": "P00FAKE123"
+        },
+        {
+          "type": "identity.drivers_license",
+          "span": "D1234-5678-FAKE-9"
+        }
+      ],
+      "note": "Two government ID types captured together during a KYC-style check-in flow."
+    },
+    {
+      "id": "p005",
+      "text": "National ID: 990101-14-5566, Tax ID: 12-3456789, submitted for payroll onboarding.",
+      "category": "personal-data",
+      "expected_entities": [
+        {
+          "type": "identity.national_id",
+          "span": "990101-14-5566"
+        },
+        {
+          "type": "identity.tax_id",
+          "span": "12-3456789"
+        }
+      ],
+      "note": "National identity number and tax ID pulled from an HR onboarding record."
+    },
+    {
+      "id": "p006",
+      "text": "Card charged: 4111 1111 1111 1234, exp 09/28, billed $482.50 to the account on file.",
+      "category": "personal-data",
+      "expected_entities": [
+        {
+          "type": "financial.credit_card",
+          "span": "4111 1111 1111 1234"
+        },
+        {
+          "type": "financial.amount",
+          "span": "$482.50"
+        }
+      ],
+      "note": "Credit card PAN and a dollar amount in a billing confirmation email."
+    },
+    {
+      "id": "p007",
+      "text": "Wire instructions: account 000123456789, routing via IBAN GB29 NWBK 6016 1331 9268 19, SWIFT/BIC NWBKGB2L.",
+      "category": "personal-data",
+      "expected_entities": [
+        {
+          "type": "financial.bank_account",
+          "span": "000123456789"
+        },
+        {
+          "type": "financial.iban",
+          "span": "GB29 NWBK 6016 1331 9268 19"
+        },
+        {
+          "type": "financial.swift_bic",
+          "span": "NWBKGB2L"
+        }
+      ],
+      "note": "Bank account, IBAN and SWIFT/BIC together in wire transfer instructions."
+    },
+    {
+      "id": "p008",
+      "text": "Refund sent to crypto wallet bc1qar0srrr7xfkvy5l643lydnw9re59gtzzwf5mdq per the ticket.",
+      "category": "personal-data",
+      "expected_entities": [
+        {
+          "type": "financial.crypto_wallet",
+          "span": "bc1qar0srrr7xfkvy5l643lydnw9re59gtzzwf5mdq"
+        }
+      ],
+      "note": "Cryptocurrency wallet address disclosed in a support refund note."
+    },
+    {
+      "id": "p009",
+      "text": "Patient reports condition: type 2 diabetes, currently prescribed metformin 500mg twice daily.",
+      "category": "personal-data",
+      "expected_entities": [
+        {
+          "type": "healthcare.condition",
+          "span": "type 2 diabetes"
+        },
+        {
+          "type": "healthcare.medication",
+          "span": "metformin 500mg"
+        }
+      ],
+      "note": "Clinical note pairing a diagnosis with a medication and dosage."
+    },
+    {
+      "id": "p010",
+      "text": "Medical record MRN-00F4K3-2026 references health plan ID HPX-778899-Q on the insurance claim.",
+      "category": "personal-data",
+      "expected_entities": [
+        {
+          "type": "healthcare.medical_record",
+          "span": "MRN-00F4K3-2026"
+        },
+        {
+          "type": "healthcare.health_plan_id",
+          "span": "HPX-778899-Q"
+        }
+      ],
+      "note": "Medical record number and insurance health plan ID on a claim form."
+    },
+    {
+      "id": "p011",
+      "text": "The phone connected from IP 198.51.100.23 and its MAC address is 02:00:5E:10:00:00.",
+      "category": "personal-data",
+      "expected_entities": [
+        {
+          "type": "contact.ip_address",
+          "span": "198.51.100.23"
+        },
+        {
+          "type": "device.mac_address",
+          "span": "02:00:5E:10:00:00"
+        }
+      ],
+      "note": "IP address (RFC 5737 documentation range) and device MAC in a network access log."
+    },
+    {
+      "id": "p012",
+      "text": "Lost-device report: IMEI 490154203237518, last GPS fix at 47.6205, -122.3493.",
+      "category": "personal-data",
+      "expected_entities": [
+        {
+          "type": "device.imei",
+          "span": "490154203237518"
+        },
+        {
+          "type": "location.gps_coordinates",
+          "span": "47.6205, -122.3493"
+        }
+      ],
+      "note": "Device IMEI and precise GPS coordinates in a lost-phone report."
+    },
+    {
+      "id": "p013",
+      "text": "Device pairing failed for developer device_id AND-FAKE-88221100-DEV, retry after re-registering.",
+      "category": "personal-data",
+      "expected_entities": [
+        {
+          "type": "developer.device_id",
+          "span": "AND-FAKE-88221100-DEV"
+        }
+      ],
+      "note": "Developer-scoped device identifier in an app crash log."
+    },
+    {
+      "id": "p014",
+      "text": "Case No. 2026-CV-004512 was filed against the vendor; see docket entry for details.",
+      "category": "personal-data",
+      "expected_entities": [
+        {
+          "type": "legal.case_number",
+          "span": "2026-CV-004512"
+        }
+      ],
+      "note": "Court case number referenced in a legal correspondence excerpt."
+    },
+    {
+      "id": "p015",
+      "text": "Contact @renice_fake on the forum, or reach the company at Acme Robotics Holdings for procurement questions.",
+      "category": "personal-data",
+      "expected_entities": [
+        {
+          "type": "online.username",
+          "span": "@renice_fake"
+        },
+        {
+          "type": "org.company_name",
+          "span": "Acme Robotics Holdings"
+        }
+      ],
+      "note": "Forum username handle plus a company name in a community post."
+    },
+    {
+      "id": "p016",
+      "text": "See the incident writeup at https://status.example.com/incidents/2026-08-04-outage for the full timeline.",
+      "category": "personal-data",
+      "expected_entities": [
+        {
+          "type": "online.url",
+          "span": "https://status.example.com/incidents/2026-08-04-outage"
+        }
+      ],
+      "note": "A specific URL flagged as online.url entity type; content itself is otherwise non-sensitive."
+    },
+    {
+      "id": "p017",
+      "text": "Employee self-disclosed political affiliation as Independent and religion as Buddhist during the optional survey.",
+      "category": "personal-data",
+      "expected_entities": [
+        {
+          "type": "special.political",
+          "span": "Independent"
+        },
+        {
+          "type": "special.religion",
+          "span": "Buddhist"
+        }
+      ],
+      "note": "Sensitive special-category attributes from an optional HR diversity survey."
+    },
+    {
+      "id": "p018",
+      "text": "The patient's chart notes sexual orientation: bisexual, and health status: currently in remission.",
+      "category": "personal-data",
+      "expected_entities": [
+        {
+          "type": "special.orientation",
+          "span": "bisexual"
+        },
+        {
+          "type": "special.health_status",
+          "span": "currently in remission"
+        }
+      ],
+      "note": "Special-category health status and orientation fields in a clinical chart excerpt."
+    },
+    {
+      "id": "p019",
+      "text": "Shipping to Maria Fernanda Ortiz-Vega, Calle Falsa 123, 28080 Madrid, teléfono 555-0199.",
+      "category": "personal-data",
+      "expected_entities": [
+        {
+          "type": "identity.person_name",
+          "span": "Maria Fernanda Ortiz-Vega"
+        },
+        {
+          "type": "contact.address",
+          "span": "Calle Falsa 123"
+        },
+        {
+          "type": "contact.postal_code",
+          "span": "28080"
+        },
+        {
+          "type": "contact.phone",
+          "span": "555-0199"
+        }
+      ],
+      "note": "Spanish-language shipping label mixing name, street address, postal code and phone."
+    },
+    {
+      "id": "p020",
+      "text": "田中 太郎さんの連絡先はメール tanaka.taro@example.co.jp、電話番号は 090-0000-1234 です。",
+      "category": "personal-data",
+      "expected_entities": [
+        {
+          "type": "identity.person_name",
+          "span": "田中 太郎"
+        },
+        {
+          "type": "contact.email",
+          "span": "tanaka.taro@example.co.jp"
+        },
+        {
+          "type": "contact.phone",
+          "span": "090-0000-1234"
+        }
+      ],
+      "note": "Japanese-language contact card: full name, email, and phone number together."
+    },
+    {
+      "id": "p021",
+      "text": "住所は東京都渋谷区神南1-2-3、郵便番号150-0041です。生年月日は1988年5月20日。",
+      "category": "personal-data",
+      "expected_entities": [
+        {
+          "type": "contact.address",
+          "span": "東京都渋谷区神南1-2-3"
+        },
+        {
+          "type": "contact.postal_code",
+          "span": "150-0041"
+        },
+        {
+          "type": "identity.date_of_birth",
+          "span": "1988年5月20日"
+        }
+      ],
+      "note": "Japanese address, postal code and date of birth in a form-style sentence."
+    },
+    {
+      "id": "p022",
+      "text": "退院時の診断は季節性うつ病、処方薬はセルトラリン50mgです。",
+      "category": "personal-data",
+      "expected_entities": [
+        {
+          "type": "healthcare.condition",
+          "span": "季節性うつ病"
+        },
+        {
+          "type": "healthcare.medication",
+          "span": "セルトラリン50mg"
+        }
+      ],
+      "note": "Japanese clinical discharge note with a mental-health condition and medication."
+    },
+    {
+      "id": "n001",
+      "text": "const apiKey = process.env.API_KEY; // set this in your local .env, never commit a real value",
+      "category": "clean",
+      "expected_entities": [],
+      "note": "Variable named apiKey but holds an env-var reference, not a literal secret."
+    },
+    {
+      "id": "n002",
+      "text": "config.yaml:\n  password: <YOUR_PASSWORD_HERE>\n  api_key: <YOUR_API_KEY_HERE>",
+      "category": "clean",
+      "expected_entities": [],
+      "note": "Config template uses angle-bracket placeholders instead of real credential values."
+    },
+    {
+      "id": "n003",
+      "text": "README: 'To authenticate, set the API_KEY environment variable to the value from your dashboard. Never hardcode it in source.'",
+      "category": "clean",
+      "expected_entities": [],
+      "note": "Documentation talking ABOUT credentials in the abstract, no concrete value present."
+    },
+    {
+      "id": "n004",
+      "text": "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFakePublicKeyMaterialNotSecretDoNotFlag00 deploy@ci-runner",
+      "category": "clean",
+      "expected_entities": [],
+      "note": "SSH PUBLIC key (authorized_keys style) — safe to share, must not be flagged as a private_key leak."
+    },
+    {
+      "id": "n005",
+      "text": "Commit a1b2c3d4e5f6789012345678901234567890abcd fixed the flaky retry test.",
+      "category": "clean",
+      "expected_entities": [],
+      "note": "Git commit SHA — a 40-hex-char hash, structurally similar to a token but not a credential."
+    },
+    {
+      "id": "n006",
+      "text": "File checksum (sha256): e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "category": "clean",
+      "expected_entities": [],
+      "note": "A cryptographic hash of file contents, not a secret or personal identifier."
+    },
+    {
+      "id": "n007",
+      "text": "Request correlation id: 550e8400-e29b-41d4-a716-446655440000, no user data attached.",
+      "category": "clean",
+      "expected_entities": [],
+      "note": "A random UUID used purely as a trace/correlation id, not tied to a person or credential."
+    },
+    {
+      "id": "n008",
+      "text": "def get_password(prompt: str) -> str:\n    \"\"\"Prompt the user and return whatever they type; caller is responsible for storage.\"\"\"\n    return input(prompt)",
+      "category": "clean",
+      "expected_entities": [],
+      "note": "Function named get_password but contains no actual password value, just a docstring and generic code."
+    },
+    {
+      "id": "n009",
+      "text": "Our security policy requires rotating any credential (api_key, jwt, private_key, connection_string) within 90 days of exposure.",
+      "category": "clean",
+      "expected_entities": [],
+      "note": "Policy prose that names all four credential taxonomy categories generically, with zero concrete values."
+    },
+    {
+      "id": "n010",
+      "text": "SELECT COUNT(*) FROM users WHERE created_at > '2026-01-01'; -- no PII columns selected",
+      "category": "clean",
+      "expected_entities": [],
+      "note": "SQL query touching a users table but selecting only an aggregate count, no personal fields."
+    },
+    {
+      "id": "n011",
+      "text": "example.com and example.org are IANA-reserved domains used throughout our documentation for illustrative URLs.",
+      "category": "clean",
+      "expected_entities": [],
+      "note": "RFC 2606 reserved domains mentioned as documentation examples, not a real endpoint leak."
+    },
+    {
+      "id": "n012",
+      "text": "The test suite uses 192.0.2.1 and 198.51.100.1 as stand-in addresses per RFC 5737; they route nowhere.",
+      "category": "clean",
+      "expected_entities": [],
+      "note": "Explicitly documentation-reserved IP ranges used for testing, not a real contact.ip_address."
+    },
+    {
+      "id": "n013",
+      "text": "-----BEGIN PUBLIC KEY-----\nMFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEFakePublicKeyBytesNotSecret==\n-----END PUBLIC KEY-----",
+      "category": "clean",
+      "expected_entities": [],
+      "note": "PEM-armored PUBLIC key block; public keys are shareable and must not trip credential.private_key."
+    },
+    {
+      "id": "n014",
+      "text": "user_count, avg_session_minutes, and churn_rate are the three columns in this week's dashboard export.",
+      "category": "clean",
+      "expected_entities": [],
+      "note": "Generic analytics column names with no identifying data whatsoever."
+    },
+    {
+      "id": "n015",
+      "text": "The word 'password' appears 4 times in this style guide as an example of a compound noun.",
+      "category": "clean",
+      "expected_entities": [],
+      "note": "Meta-discussion of the word 'password' itself, never a real credential value."
+    },
+    {
+      "id": "n016",
+      "text": "Version 2.4.1 changelog: renamed internal field secret_key_placeholder to config_token_placeholder for clarity.",
+      "category": "clean",
+      "expected_entities": [],
+      "note": "Changelog entry renaming a field that is itself named as a placeholder, no real secret involved."
+    },
+    {
+      "id": "n017",
+      "text": "MAC address format is six colon-separated hex octets, e.g. XX:XX:XX:XX:XX:XX, per IEEE 802.",
+      "category": "clean",
+      "expected_entities": [],
+      "note": "Documentation describing the MAC address FORMAT using an X-placeholder pattern, not a real address."
+    },
+    {
+      "id": "n018",
+      "text": "国際化テストでは架空の郵便番号フォーマット 999-9999 をプレースホルダーとして使用します。",
+      "category": "clean",
+      "expected_entities": [],
+      "note": "Japanese-language doc describing a placeholder postal code FORMAT, not a real address."
+    },
+    {
+      "id": "t001",
+      "text": "STRIPE_API_KEY=sk_live_****************************REDACTED",
+      "category": "tricky-negative",
+      "expected_entities": [],
+      "note": "Key fully masked with asterisks and REDACTED marker — no recoverable secret material remains."
+    },
+    {
+      "id": "t002",
+      "text": "password: ${DB_PASSWORD}  # value injected at deploy time from the secrets manager, never stored here",
+      "category": "tricky-negative",
+      "expected_entities": [],
+      "note": "Password field holds a shell/CI variable reference, not a literal value — nothing to leak."
+    },
+    {
+      "id": "t003",
+      "text": "// Example only, this key was revoked the same day it was posted publicly on the incident retro:\n// OLD_KEY=sk-live-revoked000000000000000000000000fake",
+      "category": "tricky-negative",
+      "expected_entities": [
+        {
+          "type": "credential.api_key",
+          "span": "sk-live-revoked000000000000000000000000fake"
+        }
+      ],
+      "note": "Key-shaped string inside a comment marked revoked/example; a format-level tagger should still flag the literal (defense-in-depth: humans mislabel keys as 'revoked' incorrectly all the time), but note the surrounding context claims it's dead."
+    },
+    {
+      "id": "t004",
+      "text": "connection_string_example = \"postgres://user:PASSWORD_PLACEHOLDER@host:5432/db\"  # template in our onboarding docs",
+      "category": "tricky-negative",
+      "expected_entities": [],
+      "note": "Connection string template using the literal word PASSWORD_PLACEHOLDER instead of a real credential."
+    },
+    {
+      "id": "t005",
+      "text": "test fixture: MOCK_JWT = 'header.payload.signature'  # intentionally not a valid JWT, used to test parser rejection",
+      "category": "tricky-negative",
+      "expected_entities": [],
+      "note": "Deliberately malformed three-part dot string used as a negative test fixture, not a real token."
+    },
+    {
+      "id": "t006",
+      "text": "Rotated 2026-08-01. Previous (now inert) key retained only for audit trail: ak_inert_0000000000000000000000fakeROTATED",
+      "category": "tricky-negative",
+      "expected_entities": [
+        {
+          "type": "credential.api_key",
+          "span": "ak_inert_0000000000000000000000fakeROTATED"
+        }
+      ],
+      "note": "A rotated/inert key is still a format-matching credential string in an audit log; kaibo should still flag it since it identifies the org's key format and rotation cadence."
+    },
+    {
+      "id": "t007",
+      "text": "SSN format example for the intake form: XXX-XX-XXXX (do not enter a real SSN in this sandbox environment).",
+      "category": "tricky-negative",
+      "expected_entities": [],
+      "note": "SSN pattern shown with X placeholders describing the FORMAT, not an actual social security number."
+    },
+    {
+      "id": "t008",
+      "text": "credit_card_regex = r'^[0-9]{4}[- ]?[0-9]{4}[- ]?[0-9]{4}[- ]?[0-9]{4}$'  # matches but does not contain a card number",
+      "category": "tricky-negative",
+      "expected_entities": [],
+      "note": "A regex pattern for matching credit card numbers — contains no actual card digits."
+    },
+    {
+      "id": "t009",
+      "text": "In our runbook: 'if you see a string matching sk-[a-z]+-[0-9]{20,} in logs, treat it as a leaked API key and rotate immediately.'",
+      "category": "tricky-negative",
+      "expected_entities": [],
+      "note": "Runbook describes the SHAPE of API keys using a regex-like description, no literal key value present."
+    },
+    {
+      "id": "t010",
+      "text": "sample .env.example committed to the repo on purpose:\nAPI_KEY=replace_with_your_own_key\nDB_PASSWORD=replace_with_your_own_password",
+      "category": "tricky-negative",
+      "expected_entities": [],
+      "note": "A conventional .env.example file with obvious replace_with_* placeholders, safe to commit by design."
+    },
+    {
+      "id": "t011",
+      "text": "IBAN checksum test vector from the spec (invalid on purpose): GB00 0000 0000 0000 0000 00",
+      "category": "tricky-negative",
+      "expected_entities": [],
+      "note": "An all-zero IBAN used purely as a checksum-validation test vector, not a real account."
+    },
+    {
+      "id": "t012",
+      "text": "支払い情報のプレースホルダー: クレジットカード番号は 0000-0000-0000-0000 として表示されます（実データではありません）。",
+      "category": "tricky-negative",
+      "expected_entities": [],
+      "note": "Japanese UI copy showing an all-zero placeholder card number pattern, explicitly not real data."
+    },
+    {
+      "id": "t013",
+      "text": "Bug repro requires a *fake* JWT for the negative test: 'not.a.jwt' fails validation as expected in test_auth.py::test_rejects_malformed_token",
+      "category": "tricky-negative",
+      "expected_entities": [],
+      "note": "Test code intentionally uses a malformed non-token string to verify rejection logic."
+    },
+    {
+      "id": "m001",
+      "text": "Incident report: engineer Carlos Mendoza (carlos.mendoza@example.com, 555-0177) accidentally pushed config/prod.env containing DB_PASSWORD=ProdFakeSecret88 to a public fork.",
+      "category": "leaked-credential",
+      "expected_entities": [
+        {
+          "type": "identity.person_name",
+          "span": "Carlos Mendoza"
+        },
+        {
+          "type": "contact.email",
+          "span": "carlos.mendoza@example.com"
+        },
+        {
+          "type": "contact.phone",
+          "span": "555-0177"
+        },
+        {
+          "type": "credential.password",
+          "span": "ProdFakeSecret88"
+        }
+      ],
+      "note": "Composite incident narrative: reporter PII plus an actually-leaked password, exactly kaibo's real workload shape."
+    },
+    {
+      "id": "m002",
+      "text": "git blame shows the connection string mysql://svc:LegacyFakePW1@legacy-db.example.com:3306/orders was added in commit 9f8e7d6c5b4a3210fedcba9876543210fedcba98 by 山田花子.",
+      "category": "leaked-credential",
+      "expected_entities": [
+        {
+          "type": "credential.connection_string",
+          "span": "mysql://svc:LegacyFakePW1@legacy-db.example.com:3306/orders"
+        },
+        {
+          "type": "identity.person_name",
+          "span": "山田花子"
+        }
+      ],
+      "note": "Blame output mixes a real leak (connection string) with a benign hash (commit SHA, not flagged) and a Japanese author name."
+    },
+    {
+      "id": "m003",
+      "text": "New hire packet: Sam Whitfield, DOB 1994-11-02, SSN 219-09-9999, direct deposit to account 000998877665, routing IBAN DE89 3704 0044 0532 0130 00.",
+      "category": "personal-data",
+      "expected_entities": [
+        {
+          "type": "identity.person_name",
+          "span": "Sam Whitfield"
+        },
+        {
+          "type": "identity.date_of_birth",
+          "span": "1994-11-02"
+        },
+        {
+          "type": "identity.ssn",
+          "span": "219-09-9999"
+        },
+        {
+          "type": "financial.bank_account",
+          "span": "000998877665"
+        },
+        {
+          "type": "financial.iban",
+          "span": "DE89 3704 0044 0532 0130 00"
+        }
+      ],
+      "note": "Dense HR onboarding packet — the highest-density realistic case for kaibo's payload scanning."
+    },
+    {
+      "id": "m004",
+      "text": "escalation ticket #4471: patient healthcare.medical_record MRN-778812X, condition major depressive disorder, currently prescribed sertraline 100mg, health status stable-outpatient.",
+      "category": "personal-data",
+      "expected_entities": [
+        {
+          "type": "healthcare.medical_record",
+          "span": "MRN-778812X"
+        },
+        {
+          "type": "healthcare.condition",
+          "span": "major depressive disorder"
+        },
+        {
+          "type": "healthcare.medication",
+          "span": "sertraline 100mg"
+        },
+        {
+          "type": "special.health_status",
+          "span": "stable-outpatient"
+        }
+      ],
+      "note": "Healthcare escalation ticket combining medical record id, condition, medication, and special health status."
+    },
+    {
+      "id": "m005",
+      "text": "curl -H 'Authorization: Bearer eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJzdmMtYm90In0.fakeSig000000000000000000000' https://api.internal.example.com/v1/users/551 # returns PII for user 551, phone 555-0166",
+      "category": "leaked-credential",
+      "expected_entities": [
+        {
+          "type": "credential.jwt",
+          "span": "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJzdmMtYm90In0.fakeSig000000000000000000000"
+        },
+        {
+          "type": "contact.phone",
+          "span": "555-0166"
+        }
+      ],
+      "note": "A curl one-liner in a wiki page leaking both a bearer token and a downstream phone number in the comment."
+    },
+    {
+      "id": "m006",
+      "text": "Company Acme Robotics Holdings' legal team opened case number 2026-CIV-771 after a contractor's crypto wallet 0x0000FakeWalletAddress0000000000000000fe was drained.",
+      "category": "personal-data",
+      "expected_entities": [
+        {
+          "type": "org.company_name",
+          "span": "Acme Robotics Holdings"
+        },
+        {
+          "type": "legal.case_number",
+          "span": "2026-CIV-771"
+        },
+        {
+          "type": "financial.crypto_wallet",
+          "span": "0x0000FakeWalletAddress0000000000000000fe"
+        }
+      ],
+      "note": "Legal/finance crossover case: company name, case number, and a crypto wallet address."
+    },
+    {
+      "id": "m007",
+      "text": "Slack thread: '@renice_fake just found this in the outbound payload before it hit the third-party API: {\"user_ip\": \"203.0.113.77\", \"device_imei\": \"356938035643809\"}' — good catch, that's exactly what the boundary guard should stop.",
+      "category": "leaked-credential",
+      "expected_entities": [
+        {
+          "type": "online.username",
+          "span": "@renice_fake"
+        },
+        {
+          "type": "contact.ip_address",
+          "span": "203.0.113.77"
+        },
+        {
+          "type": "device.imei",
+          "span": "356938035643809"
+        }
+      ],
+      "note": "Meta case: a Slack message ABOUT catching a leak that itself quotes the leaked payload verbatim — the guard must still catch the quoted IP and IMEI."
+    },
+    {
+      "id": "m008",
+      "text": "backup script log: mongodump --uri 'mongodb://backup_svc:BackupFake2026@10.20.30.40:27017/reporting' completed for GPS-tagged asset at 35.6812, 139.7671.",
+      "category": "leaked-credential",
+      "expected_entities": [
+        {
+          "type": "credential.connection_string",
+          "span": "mongodb://backup_svc:BackupFake2026@10.20.30.40:27017/reporting"
+        },
+        {
+          "type": "location.gps_coordinates",
+          "span": "35.6812, 139.7671"
+        }
+      ],
+      "note": "Ops log combining a DB connection string with GPS coordinates for an asset-tracking system."
+    },
+    {
+      "id": "m009",
+      "text": "Health insurance appeal letter for religion-based dietary accommodation: policyholder health plan ID HPZ-33221-R, religious affiliation Orthodox Judaism noted per patient request.",
+      "category": "personal-data",
+      "expected_entities": [
+        {
+          "type": "healthcare.health_plan_id",
+          "span": "HPZ-33221-R"
+        },
+        {
+          "type": "special.religion",
+          "span": "Orthodox Judaism"
+        }
+      ],
+      "note": "Insurance appeal letter linking a health plan ID with a special-category religion field."
+    },
+    {
+      "id": "m010",
+      "text": "device diagnostics: developer.device_id IOS-FAKE-99001122-QA paired with device.mac_address AC:DE:48:00:11:22, owner login jsmith2026 / FakeDevicePW3!",
+      "category": "leaked-credential",
+      "expected_entities": [
+        {
+          "type": "developer.device_id",
+          "span": "IOS-FAKE-99001122-QA"
+        },
+        {
+          "type": "device.mac_address",
+          "span": "AC:DE:48:00:11:22"
+        },
+        {
+          "type": "developer.login_credentials",
+          "span": "jsmith2026 / FakeDevicePW3!"
+        }
+      ],
+      "note": "QA diagnostics dump combining device identifiers with an actual login credential pair."
+    },
+    {
+      "id": "n019",
+      "text": "The `identity.person_name` label in our taxonomy covers first, middle, and last names when disclosed together.",
+      "category": "clean",
+      "expected_entities": [],
+      "note": "Meta documentation describing the taxonomy label itself, no actual person named."
+    },
+    {
+      "id": "n020",
+      "text": "port: 5432\nhost: localhost\nmax_connections: 100\n# no credentials needed for the local dev sqlite fallback",
+      "category": "clean",
+      "expected_entities": [],
+      "note": "Local dev config block with only non-sensitive infrastructure numbers."
+    },
+    {
+      "id": "n021",
+      "text": "402 Payment Required — please retry after updating your billing method in account settings.",
+      "category": "clean",
+      "expected_entities": [],
+      "note": "Generic HTTP error message referencing billing but containing no card, account, or amount data."
+    },
+    {
+      "id": "n022",
+      "text": "class CredentialStore(Protocol):\n    def get(self, name: str) -> str | None: ...\n    def set(self, name: str, value: str) -> None: ...",
+      "category": "clean",
+      "expected_entities": [],
+      "note": "Abstract interface definition for a credential store; no concrete secret values anywhere."
+    },
+    {
+      "id": "n023",
+      "text": "健康保険証番号の入力欄は半角数字8桁で、実際のテストではダミー値 00000000 を使用してください。",
+      "category": "clean",
+      "expected_entities": [],
+      "note": "Japanese QA instructions saying to use the dummy value 00000000 for a health-plan-id field, not a real one."
+    }
+  ]
+}
