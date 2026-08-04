@@ -17,16 +17,39 @@ Upstream candle-transformers implements the *causal* LFM2
 
 ## Status
 
-**Day 0.** Milestone 1 (config) done: every family checkpoint's
-`config.json` parses and validates against real fixtures
-(`tests/fixtures/`, fetched 2026-08-03), with head detection. The
-fixtures already earned their keep — the 230M base is *shallower* (14
-layers) not just narrower, the PII config ships a literal
-`"full_attn_idxs": null`, and the Router is not a softmax classifier.
+**Milestone 2 done: the bidirectional trunk runs and matches the
+reference.** `Lfm2Trunk` reproduces LiquidAI's own
+`modeling_lfm2_bidirectional.py` to max|Δ| ≈ 4.6e-5 on f32 CPU, verified
+against activations dumped from the real Embedding-350M weights
+(`tests/reference/dump_trunk_reference.py`, transformers 4.56.2).
 
-Next: the bidirectional trunk (adapting the hybrid conv+attention blocks
-from candle-transformers' `lfm2.rs`, minus causal mask and KV cache),
-then heads in order: embedding → token classification → routing.
+Milestone 1 (config) covers every family checkpoint. The fixtures keep
+earning their keep — the 230M base is *shallower* (14 layers) not just
+narrower; the PII config ships a literal `"full_attn_idxs": null`; the
+Router is not a softmax classifier; `intermediate_size` **disagrees with
+the shipped weights** on three of four checkpoints (says 6656, ships
+4608 — see `Lfm2EncoderConfig::ffn_dim`); and the Policy-Linter turned
+out to be a fifth architecture name, `Lfm2BidirForRuleMatching`.
+
+Next: heads, in order — pooled embedding → token classification →
+routing/rule-matching.
+
+## Batching changes your embeddings (read this)
+
+The short conv is deliberately **not** masked, because that is how these
+checkpoints were trained: in the eager/sdpa path the reference's
+`apply_mask_to_padding_states` is a no-op, so pad states flow through the
+conv. With a centered `k = 3` kernel, each conv layer bleeds a pad one
+position into its real neighbour.
+
+**Consequence:** a sequence's embedding depends slightly on what it was
+batched with. Unlike BERT, padding is not inert here. If you need
+reproducible vectors — cache keys, stored embeddings, anything compared
+across processes — embed one sequence at a time with no padding. Batch
+when throughput matters more than bit-identical results.
+
+`forward()` refuses a multi-row batch with no `attention_mask` rather
+than silently treating pad tokens as content.
 
 ## Design intents
 

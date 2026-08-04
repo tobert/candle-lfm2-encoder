@@ -22,6 +22,16 @@
 //!    `rule_proj_dim`; not a fixed-label softmax).
 //! 4. **Quantized loads** (GGUF) if CPU f16/f32 latency disappoints.
 //!
+//! ## Padding is not inert
+//!
+//! The short conv is deliberately unmasked, matching how the checkpoints
+//! were trained, so pad states bleed one position per conv layer into
+//! their real neighbours. **A sequence's embedding depends on what it was
+//! batched with.** Embed one sequence at a time, unpadded, whenever you
+//! need reproducible vectors (cache keys, stored embeddings, cross-process
+//! comparisons); batch when throughput matters more. See
+//! [`Lfm2Trunk::forward`].
+//!
 //! Design intents: CPU-first (consumers embed this in long-lived server
 //! processes — kaijutsu's kernel, kaibo — where a 350M encoder pass is
 //! tens of milliseconds); no C++ in the dependency tree; weights loaded

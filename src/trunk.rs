@@ -40,10 +40,22 @@ const MASK_NEG: f64 = -1e9;
 
 /// GQA head expansion: repeat each KV head `n_rep` times to line up with
 /// the query heads.
+///
+/// The cat-on-dim-2-then-reshape is deliberate and load-bearing: catting
+/// along the sequence axis lays each KV head's `n_rep` copies down
+/// contiguously, so the reshape reinterprets them as `[kv0, kv0, kv1,
+/// kv1, …]` — the repeat_interleave order the query heads expect. Catting
+/// along the head axis instead would give `[kv0, kv1, kv0, kv1, …]`, which
+/// is a plausible-looking pairing of the wrong heads.
 fn repeat_kv(xs: Tensor, n_rep: usize) -> Result<Tensor> {
     if n_rep == 1 {
         return Ok(xs);
     }
+    // Guard rather than assume: callers currently hand us contiguous
+    // tensors, but this is cheap (candle short-circuits when already
+    // contiguous) and the failure mode if that ever stops being true is
+    // silently scrambled heads, not an error.
+    let xs = xs.contiguous()?;
     let (b, n_kv, seq, dim) = xs.dims4()?;
     Tensor::cat(&vec![&xs; n_rep], 2)?.reshape((b, n_kv * n_rep, seq, dim))
 }
@@ -188,10 +200,21 @@ impl ShortConv {
     fn load(cfg: &Lfm2EncoderConfig, vb: VarBuilder) -> Result<Self> {
         let h = cfg.hidden_size;
         let k = cfg.conv_l_cache;
-        let weight = vb.pp("conv").get((h, 1, k), "weight")?;
+        let vb_c = vb.pp("conv");
+        let weight = vb_c.get((h, 1, k), "weight")?;
         let bias = if cfg.conv_bias {
-            Some(vb.pp("conv").get(h, "bias")?)
+            Some(vb_c.get(h, "bias")?)
         } else {
+            // `conv_bias` defaults to false when the key is absent. If the
+            // checkpoint nonetheless ships a bias, the config is lying and
+            // we would silently drop a trained parameter — refuse instead.
+            if vb_c.contains_tensor("bias") {
+                return Err(candle_core::Error::Msg(format!(
+                    "checkpoint ships `{}conv.bias` but config says conv_bias=false; \
+                     loading would silently drop a trained parameter",
+                    vb_c.prefix()
+                )));
+            }
             None
         };
         // CENTERED padding — this is the encoder branch's defining
@@ -299,8 +322,12 @@ pub struct Lfm2Trunk {
     embed_tokens: Embedding,
     blocks: Vec<Block>,
     embedding_norm: RmsNorm,
-    head_dim: usize,
-    rope_theta: f64,
+    /// RoPE inverse frequencies, `(1, head_dim/2)`. Depends only on
+    /// `head_dim` and `rope_theta`, so it is built once at load rather than
+    /// per forward — these crates get embedded in daemons serving many
+    /// short sequences, where per-call allocator churn is the cost that
+    /// actually shows up.
+    inv_freq: Tensor,
     use_pos_enc: bool,
     dtype: DType,
 }
@@ -310,15 +337,24 @@ impl Lfm2Trunk {
     /// checkpoint hid it. Fails loudly and names what it looked for rather
     /// than falling back to an untied random init.
     pub fn load(cfg: &Lfm2EncoderConfig, vb: VarBuilder) -> Result<Self> {
-        let prefix = TRUNK_PREFIXES
+        let found: Vec<&&str> = TRUNK_PREFIXES
             .iter()
-            .find(|p| vb.contains_tensor(&format!("{p}embed_tokens.weight")))
-            .ok_or_else(|| {
-                candle_core::Error::Msg(format!(
-                    "no LFM2 trunk found: none of {TRUNK_PREFIXES:?} carry `embed_tokens.weight`"
-                ))
-            })?;
-        Self::load_with_prefix(cfg, vb, prefix)
+            .filter(|p| vb.contains_tensor(&format!("{p}embed_tokens.weight")))
+            .collect();
+        match found.as_slice() {
+            [prefix] => Self::load_with_prefix(cfg, vb, prefix),
+            [] => Err(candle_core::Error::Msg(format!(
+                "no LFM2 trunk found: none of {TRUNK_PREFIXES:?} carry `embed_tokens.weight`"
+            ))),
+            // A merged or multi-task checkpoint could carry two. Picking
+            // the first would load a real trunk from the wrong place and
+            // never say so; make the caller name the one they meant via
+            // `load_with_prefix`.
+            many => Err(candle_core::Error::Msg(format!(
+                "ambiguous LFM2 trunk: {many:?} all carry `embed_tokens.weight`; \
+                 use load_with_prefix() to say which one you mean"
+            ))),
+        }
     }
 
     /// Load from an explicit prefix (`""` for the bare Embedding
@@ -345,12 +381,19 @@ impl Lfm2Trunk {
         let embedding_norm =
             candle_nn::rms_norm(cfg.hidden_size, cfg.norm_eps, vb.pp("embedding_norm"))?;
 
+        let head_dim = cfg.head_dim();
+        let rope_theta = cfg.rope_theta();
+        let inv_freq: Vec<f32> = (0..head_dim)
+            .step_by(2)
+            .map(|i| (1f64 / rope_theta.powf(i as f64 / head_dim as f64)) as f32)
+            .collect();
+        let inv_freq = Tensor::new(inv_freq.as_slice(), vb.device())?.reshape((1, ()))?;
+
         Ok(Self {
             embed_tokens,
             blocks,
             embedding_norm,
-            head_dim: cfg.head_dim(),
-            rope_theta: cfg.rope_theta(),
+            inv_freq,
             use_pos_enc: cfg.use_pos_enc,
             dtype: vb.dtype(),
         })
@@ -363,15 +406,10 @@ impl Lfm2Trunk {
     /// full table would burn 16 MiB to serve 512 rows. Building `seq × 32`
     /// values per forward is noise next to a 350M-parameter pass.
     fn rope_tables(&self, seq: usize, device: &candle_core::Device) -> Result<(Tensor, Tensor)> {
-        let inv_freq: Vec<f32> = (0..self.head_dim)
-            .step_by(2)
-            .map(|i| (1f64 / self.rope_theta.powf(i as f64 / self.head_dim as f64)) as f32)
-            .collect();
-        let inv_freq = Tensor::new(inv_freq.as_slice(), device)?.reshape((1, ()))?;
         let positions = Tensor::arange(0u32, seq as u32, device)?
             .to_dtype(DType::F32)?
             .reshape((seq, 1))?;
-        let freqs = positions.matmul(&inv_freq)?;
+        let freqs = positions.matmul(&self.inv_freq.to_device(device)?)?;
         Ok((
             freqs.cos()?.to_dtype(self.dtype)?,
             freqs.sin()?.to_dtype(self.dtype)?,
@@ -402,7 +440,18 @@ impl Lfm2Trunk {
     /// reproducible path; batch when throughput matters more than
     /// bit-identical results.
     pub fn forward(&self, input_ids: &Tensor, attention_mask: Option<&Tensor>) -> Result<Tensor> {
-        let (_, seq) = input_ids.dims2()?;
+        let (batch, seq) = input_ids.dims2()?;
+        // A multi-row batch with no mask is almost certainly a caller who
+        // padded and forgot: pad tokens would be attended to as content AND
+        // flow through the convs, quietly corrupting every row in the
+        // batch. There is no output that would look wrong. Refuse.
+        if attention_mask.is_none() && batch > 1 {
+            return Err(candle_core::Error::Msg(format!(
+                "forward() called with batch {batch} and no attention_mask: if these rows \
+                 are padded the pad tokens are treated as content and silently corrupt \
+                 every row. Pass a (batch, seq) mask, or call one row at a time."
+            )));
+        }
         let mask = attention_mask.map(Self::additive_mask).transpose()?;
         let rope = if self.use_pos_enc {
             Some(self.rope_tables(seq, input_ids.device())?)
