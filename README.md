@@ -70,6 +70,28 @@ identical rankings — and it contends *less* than f32, so it scales better
 as you add models. `bf16`, despite being the checkpoints' own storage
 dtype, is unsupported for `matmul` on candle CPU.
 
+### ColBERT: late interaction, and it wins
+
+`ColbertModel` implements `LFM2.5-ColBERT-350M` — one 128-dim vector per
+token, scored with MaxSim, verified against PyLate itself. Head to head on
+the same corpus (`cargo run --release --example compare_retrievers`):
+
+| | recall@1 | recall@3 | hard-neg wins | index | query |
+|---|---|---|---|---|---|
+| single-vector (CLS + cosine) | 88.6% | 100% | 1.5% | 4.1 KB/doc | 67 ms |
+| **ColBERT (MaxSim)** | **97.1%** | 100% | **0.0%** | 15.5 KB/doc | 90 ms |
+
+ColBERT never lets a hard negative outrank a true positive, for 3.8× the
+storage and 1.4× the query time. On short documents that trade is far
+cheaper than ColBERT's usual reputation suggests.
+
+Its conventions came from PyLate's real behaviour, not the config, because
+several are surprising: query expansion pads with **EOS** (this checkpoint
+has no mask token at all), `[Q]`/`[D]` are **real vocab ids** 64400/64401
+— which is why its vocab is 64402 rather than the family's 65536 —
+expansion tokens are masked as attention *keys* yet still emitted as
+vectors, and documents drop punctuation vectors via a 32-id skiplist.
+
 Next heads: token classification (PII/secrets) → routing/rule-matching.
 
 ## This embedding model is asymmetric
