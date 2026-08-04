@@ -25,3 +25,10 @@ hub = ["dep:hf-hub"]
 
 [dev-dependencies]
 anyhow = "1"
+
+# Optimize DEPENDENCIES in debug/test builds while our own crate stays
+# unoptimized and debuggable. candle does the arithmetic; without this a
+# plain `cargo test` runs the model tests at unusable speed and everyone
+# learns to type `--release`, which is how a suite quietly stops being run.
+[profile.dev.package."*"]
+opt-level = 3
