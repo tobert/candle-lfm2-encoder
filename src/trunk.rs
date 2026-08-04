@@ -20,7 +20,7 @@
 //! shared with the causal branch and adapted as-is.
 
 use candle_core::{DType, IndexOp, Module, Result, Tensor};
-use candle_nn::{Conv1d, Conv1dConfig, Embedding, Linear, RmsNorm, VarBuilder};
+use candle_nn::{Embedding, Linear, RmsNorm, VarBuilder};
 
 use crate::config::{LayerType, Lfm2EncoderConfig};
 
@@ -188,11 +188,25 @@ impl Attention {
 
 /// Non-causal short convolution — the gated `B * x` conv LFM2 uses in place
 /// of attention in most layers.
+///
+/// The convolution is evaluated as `k` shifted, per-channel multiply-adds
+/// rather than via [`candle_nn::Conv1d`]. That is not premature cleverness:
+/// a depthwise conv here means `groups = hidden_size = 1024`, and candle's
+/// grouped path costs a flat **~173 ms per call regardless of sequence
+/// length** — it is dominated by per-group overhead, not arithmetic. Across
+/// the 10 conv layers of a 350M checkpoint that was the entire ~1.9 s of a
+/// single short embedding. The shifted form is the same arithmetic (a
+/// depthwise conv IS a per-channel weighted sum of `k` shifts) and runs in
+/// tens of microseconds. Parity with the Python reference is unchanged;
+/// `tests/trunk_parity.rs` is what proves that.
 #[derive(Debug)]
 struct ShortConv {
     in_proj: Linear,
     out_proj: Linear,
-    conv: Conv1d,
+    /// Per-channel taps, `(hidden, 1, k)` as stored in the checkpoint.
+    conv_weight: Tensor,
+    conv_bias: Option<Tensor>,
+    kernel: usize,
     hidden_size: usize,
 }
 
@@ -217,24 +231,52 @@ impl ShortConv {
             }
             None
         };
-        // CENTERED padding — this is the encoder branch's defining
-        // difference from the causal model, which pads `k - 1` on the left.
-        // For odd k this makes out_len == seq_len exactly.
-        let conv = Conv1d::new(
-            weight,
-            bias,
-            Conv1dConfig {
-                padding: k / 2,
-                groups: h, // depthwise: one filter per channel
-                ..Default::default()
-            },
-        );
         Ok(Self {
             in_proj: candle_nn::linear_no_bias(h, 3 * h, vb.pp("in_proj"))?,
             out_proj: candle_nn::linear_no_bias(h, h, vb.pp("out_proj"))?,
-            conv,
+            conv_weight: weight,
+            conv_bias: bias,
+            kernel: k,
             hidden_size: h,
         })
+    }
+
+    /// Centered depthwise convolution over `(batch, hidden, seq)`.
+    ///
+    /// Zero-pads `k/2` on each side, then accumulates `k` shifted windows
+    /// scaled by their per-channel tap — identical arithmetic to a grouped
+    /// `Conv1d`, minus the per-group dispatch that dominates it. Centered
+    /// padding is the encoder branch's defining difference from the causal
+    /// model, which pads `k - 1` on the left only.
+    fn depthwise_conv(&self, bx: &Tensor, seq: usize) -> Result<Tensor> {
+        let (b, h, _) = bx.dims3()?;
+        let pad = self.kernel / 2;
+        let padded = if pad == 0 {
+            bx.clone()
+        } else {
+            let zeros = Tensor::zeros((b, h, pad), bx.dtype(), bx.device())?;
+            Tensor::cat(&[&zeros, bx, &zeros], 2)?
+        };
+
+        let mut acc: Option<Tensor> = None;
+        for j in 0..self.kernel {
+            // Tap j for every channel: (hidden, 1, k) -> (1, hidden, 1).
+            let tap = self.conv_weight.narrow(2, j, 1)?.reshape((1, h, 1))?;
+            // Window j: for odd k this is x shifted by j - pad. Taking
+            // exactly `seq` outputs also handles even k the way the
+            // upstream trim does — by dropping the trailing step.
+            let window = padded.narrow(2, j, seq)?;
+            let term = window.broadcast_mul(&tap)?;
+            acc = Some(match acc {
+                None => term,
+                Some(a) => (a + term)?,
+            });
+        }
+        let out = acc.expect("kernel size is at least 1");
+        match &self.conv_bias {
+            Some(bias) => out.broadcast_add(&bias.reshape((1, h, 1))?),
+            None => Ok(out),
+        }
     }
 
     fn forward(&self, xs: &Tensor) -> Result<Tensor> {
@@ -248,14 +290,7 @@ impl ShortConv {
         let x_proj = bcx.narrow(1, 2 * h, h)?;
 
         let bx = (b_gate * &x_proj)?.contiguous()?;
-        let conv_out = self.conv.forward(&bx)?;
-        // Even k would leave one extra step; the checkpoints all ship k=3,
-        // but mirror the upstream trim rather than assume oddness.
-        let conv_out = if conv_out.dim(2)? > seq {
-            conv_out.narrow(2, 0, seq)?
-        } else {
-            conv_out
-        };
+        let conv_out = self.depthwise_conv(&bx, seq)?;
 
         let out = (c_gate * conv_out)?.transpose(1, 2)?.contiguous()?;
         self.out_proj.forward(&out)
@@ -482,5 +517,11 @@ impl Lfm2Trunk {
 
     pub fn dtype(&self) -> DType {
         self.dtype
+    }
+
+    /// The device the weights live on — callers building input tensors need
+    /// to match it.
+    pub fn device(&self) -> &candle_core::Device {
+        self.inv_freq.device()
     }
 }

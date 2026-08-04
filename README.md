@@ -31,8 +31,32 @@ the shipped weights** on three of four checkpoints (says 6656, ships
 4608 — see `Lfm2EncoderConfig::ffn_dim`); and the Policy-Linter turned
 out to be a fifth architecture name, `Lfm2BidirForRuleMatching`.
 
-Next: heads, in order — pooled embedding → token classification →
-routing/rule-matching.
+**Milestone 3 started: text → vector works end to end.** `Lfm2Embedding`
+tokenizes, runs the trunk and CLS-pools, matching the reference pipeline
+including exact token ids. Try it:
+
+```
+cargo run --release --example embed -- .models/LFM2.5-Embedding-350M
+```
+
+Next heads: token classification (PII/secrets) → routing/rule-matching.
+
+## This embedding model is asymmetric
+
+Queries and documents take **different prefixes** — `"query: "` and
+`"document: "`. This is not cosmetic: the same sentence embedded both
+ways lands at cosine ≈ 0.70. Using one prefix for both sides degrades
+retrieval and nothing errors, so `TextKind` is a required argument with
+no default:
+
+```rust
+let model = Lfm2Embedding::from_dir("...")?;
+let q = model.embed_normalized("how do I borrow a value?", TextKind::Query)?;
+let d = model.embed_normalized(passage, TextKind::Document)?;
+```
+
+`embed` returns the raw vector — the checkpoint ships no Normalize
+module — and `embed_normalized` L2-normalizes so cosine is a dot product.
 
 ## Batching changes your embeddings (read this)
 
@@ -53,9 +77,19 @@ than silently treating pad tokens as content.
 
 ## Design intents
 
-- **CPU-first.** Consumers embed this in long-lived server processes
-  where a 350M encoder pass is tens of milliseconds. GPU (CUDA/Metal via
-  candle features) is a bonus, never a requirement.
+- **CPU-first.** Consumers embed this in long-lived server processes.
+  Measured on a 32-core Strix Halo: **~81 ms** per short text, f32,
+  including tokenization. GPU (CUDA/Metal via candle features) is a
+  bonus, never a requirement.
+
+  Getting there needed one non-obvious change: LFM2's short conv is
+  *depthwise* (`groups = hidden_size = 1024`), and candle's grouped
+  `Conv1d` costs a flat **~173 ms per call regardless of sequence
+  length** — per-group dispatch overhead, not arithmetic. Across 10 conv
+  layers that was the entire ~1.9 s of a single embedding. The trunk
+  evaluates the conv as `k` shifted per-channel multiply-adds instead:
+  identical arithmetic, ~23× faster end to end, parity unchanged. See
+  `cargo run --release --example bench_ops`.
 - **Pure Rust.** No C++ toolchain in the dependency tree.
 - **Local weights by default.** Point at a directory holding
   `model.safetensors` + `tokenizer.json` + `config.json`; the optional
