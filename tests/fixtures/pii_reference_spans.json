@@ -1,0 +1,117 @@
+{
+ "cases": [
+  {
+   "n": 0,
+   "id": "c001",
+   "category": "leaked-credential",
+   "text": "const stripeKey = \"sk-test-000000000000000000000000\";\nawait charge(stripeKey, amount);",
+   "model_spans": []
+  },
+  {
+   "n": 1,
+   "id": "c002",
+   "category": "leaked-credential",
+   "text": "STRIPE_API_KEY=sk_test_FAKE1234567890abcdefghijklmnop\nSTRIPE_WEBHOOK_SECRET=whsec_FAKEabc0000000000000000000000",
+   "model_spans": []
+  },
+  {
+   "n": 2,
+   "id": "c003",
+   "category": "leaked-credential",
+   "text": "AWS_ACCESS_KEY_ID=AKIAFAKE00000000EXAM\nAWS_SECRET_ACCESS_KEY=faKE0000000000000000000000000000000000",
+   "model_spans": []
+  },
+  {
+   "n": 3,
+   "id": "p001",
+   "category": "personal-data",
+   "text": "Reported by Jane A. Doherty (jane.doherty@example.com) via the support portal.",
+   "model_spans": [
+    {
+     "start": 12,
+     "end": 27,
+     "type": "identity.person_name"
+    },
+    {
+     "start": 29,
+     "end": 53,
+     "type": "contact.email"
+    }
+   ]
+  },
+  {
+   "n": 4,
+   "id": "p002",
+   "category": "personal-data",
+   "text": "Please call the customer back at 555-0142 to confirm the return address, 1200 Meridian Ave, Springfield, 62704.",
+   "model_spans": [
+    {
+     "start": 33,
+     "end": 41,
+     "type": "contact.phone"
+    },
+    {
+     "start": 73,
+     "end": 90,
+     "type": "contact.address"
+    },
+    {
+     "start": 92,
+     "end": 103,
+     "type": "contact.address"
+    },
+    {
+     "start": 105,
+     "end": 110,
+     "type": "contact.postal_code"
+    }
+   ]
+  },
+  {
+   "n": 5,
+   "id": "p003",
+   "category": "personal-data",
+   "text": "Client SSN on file: 078-05-1120, DOB 1990-03-14, for the loan application.",
+   "model_spans": [
+    {
+     "start": 20,
+     "end": 31,
+     "type": "identity.ssn"
+    },
+    {
+     "start": 37,
+     "end": 47,
+     "type": "identity.date_of_birth"
+    }
+   ]
+  },
+  {
+   "n": 6,
+   "id": "n001",
+   "category": "clean",
+   "text": "const apiKey = process.env.API_KEY; // set this in your local .env, never commit a real value",
+   "model_spans": []
+  },
+  {
+   "n": 7,
+   "id": "n002",
+   "category": "clean",
+   "text": "config.yaml:\n  password: <YOUR_PASSWORD_HERE>\n  api_key: <YOUR_API_KEY_HERE>",
+   "model_spans": []
+  },
+  {
+   "n": 8,
+   "id": "n003",
+   "category": "clean",
+   "text": "README: 'To authenticate, set the API_KEY environment variable to the value from your dashboard. Never hardcode it in source.'",
+   "model_spans": []
+  },
+  {
+   "n": 9,
+   "id": "t001",
+   "category": "tricky-negative",
+   "text": "STRIPE_API_KEY=sk_live_****************************REDACTED",
+   "model_spans": []
+  }
+ ]
+}
