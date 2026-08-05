@@ -1,10 +1,13 @@
 #!/usr/bin/env python3
-"""Gate-check gen2 data and build kube_train_v2/kube_val_v2.
+"""Gate-check the kube pool and build kube_train_v4/kube_val_v4.
 
 Inputs:
   prepared/kube_slice_*.jsonl          (original 4 slices)
-  gen2/kube_gen2_<persona>.jsonl       (6 training personas)
+  gen2/kube_gen2_<persona>.jsonl       (9 training personas)
   gen2/kube_gen2_holdout_*.jsonl       (2 holdout personas — NEVER in train)
+  incoming/kube_gen_*_sample.jsonl     (4 multi-model standard probes)
+  incoming/kube_subtle_*_train.jsonl   (2 multi-model subtle batches)
+  incoming/kube_subtle_*_evalonly.jsonl (eval-only probes — NEVER in train)
   prepared/kube_test.jsonl             (v1 test — stays untouched)
 
 Gates (loud failure, no silent drops except exact dups):
@@ -16,7 +19,7 @@ Gates (loud failure, no silent drops except exact dups):
      (counted, reported).
   4. Same-label exact dups deduped (keep first).
 
-Output: prepared/kube_train_v2.jsonl (90%), prepared/kube_val_v2.jsonl
+Output: prepared/kube_train_v4.jsonl (90%), prepared/kube_val_v4.jsonl
 (10%), stratified by (source, label). Aggregates printed; never a row.
 """
 import json
@@ -69,8 +72,18 @@ if len(train_files) != EXPECTED_TRAIN_FILES or len(holdout_files) != 2:
 for p in train_files:
     pool.extend(load(p, p.stem.replace("kube_gen2_", "gen2-")))
 
+incoming_train = sorted((DATA / "incoming").glob("kube_gen_*_sample.jsonl")) + \
+    sorted((DATA / "incoming").glob("kube_subtle_*_train.jsonl"))
+incoming_evalonly = sorted((DATA / "incoming").glob("kube_subtle_*_evalonly.jsonl"))
+EXPECTED_INCOMING = (6, 2)  # 4 standard probes + 2 subtle batches, 2 eval-only
+if (len(incoming_train), len(incoming_evalonly)) != EXPECTED_INCOMING:
+    sys.exit(f"GATE FAIL: expected {EXPECTED_INCOMING} incoming train/evalonly files, "
+             f"got ({len(incoming_train)}, {len(incoming_evalonly)})")
+for p in incoming_train:
+    pool.extend(load(p, "mm-" + p.stem.replace("kube_", "").replace("_sample", "")))
+
 reserved = set()
-for p in [DATA / "prepared/kube_test.jsonl", *holdout_files]:
+for p in [DATA / "prepared/kube_test.jsonl", *holdout_files, *incoming_evalonly]:
     for line in open(p):
         reserved.add(norm(json.loads(line)["text"]))
 
@@ -120,10 +133,10 @@ for key in sorted(strata):
     train.extend(g[n_val:])
 rng.shuffle(train)
 rng.shuffle(val)
-for name, items in [("kube_train_v3", train), ("kube_val_v3", val)]:
+for name, items in [("kube_train_v4", train), ("kube_val_v4", val)]:
     with open(DATA / "prepared" / f"{name}.jsonl", "w") as f:
         for r in items:
             f.write(json.dumps(r) + "\n")
     print(f"{name}: {len(items)} rows  "
           f"labels={dict(sorted(Counter(r['label'] for r in items).items()))}")
-print("OK: gates passed, v2 splits written")
+print("OK: gates passed, v4 splits written")

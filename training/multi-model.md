@@ -86,3 +86,33 @@ Models engaged: deepseek-v4-pro, gpt-5.6-luna, gemini-3.5-flash,
 qwen3-coder-next, kimi-k2.7-code, glm-5.2 (generation/design);
 claude-haiku-4-5 (blind relabel); gpt-5.6-luna (blind arbitration);
 all via kaibo except the haiku subagent.
+
+## Corpus reclassification (same day, Amy's call)
+
+Luna reviewed every haiku label in the 16 kube source files (1,979 rows,
+5 chunked consults via `recheck_labels.py`; instructed to say "unsure"
+rather than guess). GLM-5.2 ruled on the unsure set only.
+
+- Luna: 1,858 upheld, **91 corrected (4.6%)**, 30 unsure. Corrections
+  skew DOWN in severity (41 downgrades vs 15 upgrades): generation-time
+  haiku over-flags — the origin of v3's conservative lean. Worst files:
+  cluster_admin 31/100, contested slice 15/225, ci_pipeline 13/100.
+  storage_stateful concentrated the genuinely hard rows (14/100 unsure).
+- GLM: decided 29/30 unsure (18 further moves, all →mutating); 1 row
+  (holdout_nl_assistant:40) undecidable by both — label stands, flagged
+  contested. One luna patch created a text-identical contradiction
+  (ci_pipeline:90 vs an sre_incident read); GLM arbitrated → informative.
+- All patches carry `contested: true` + an audit note naming reviewer
+  and move; CAS/original provenance unchanged.
+- **kube_test moved (8 rows)** — historical v1–v3 numbers were measured
+  against a slightly wrong stick. v3 on corrected labels: test 88.6%
+  (was 90.9), NL holdout 85.0% (was 83.3), auditor 90.0% (unchanged,
+  same 3 severe audit-deletion misses).
+
+v4 splits (post-recheck, incoming included): kube_train_v4 1,632 /
+kube_val_v4 186, stratified by (source, label); 19 sources; gates green.
+
+Ops note: 5 parallel luna consults tripped OpenAI's 200k TPM — two jobs
+died AFTER saving complete verdict artifacts (CAS made the failures
+free), two died mid-write and re-ran as half chunks. Run bulk luna
+passes ≤2 at a time.
