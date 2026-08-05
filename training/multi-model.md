@@ -174,3 +174,32 @@ candidate.** Remaining known debts: 2 severe under-flags on adversarial
 chains, 2 on audit-deletion (still eval-only by design), 1 severe NL
 miss; all eval slices are small (N=10-88) — expanding them is the next
 measurement investment.
+
+## v6 result — targeted four-form slice (miss-driven, test never revealed)
+
+81 rows from deepseek(32)/gpt-luna(29)/kimi(20), four coverage areas
+derived from characterized v5 misses (pipe-to-interpreter, gated
+conditional chains, log/audit-file lifecycle with balanced neighbors, NL
+error-diagnostics), each area label-balanced so no keyword shortcut
+works. Generator prompts described the FORMS only — no eval rows, no
+model weaknesses named. Cross-review: 80/81 upheld, zero corrections, 1
+arbitration (upheld). Pool 1,860/213. val_acc 92.5.
+
+| set | v3 | v5 | v6 |
+|---|---|---|---|
+| kube_test (corrected) | 88.6% | 88.6% | **90.9%** (all 8 misses adjacent, 6 contested) |
+| NL-assistant holdout | 85.0% (0 sev) | 85.0% (1 sev) | **90.0% (0 sev)** |
+| security-auditor holdout | 90.0% (3 sev) | 90.0% (2 sev) | **91.7% (2 sev)** |
+| glm eval-only | 30.0% (5 sev) | 60.0% (2 sev) | **70.0% (1 sev)** |
+| kimi eval-only | 70.0% | 60.0% | **80.0%** (both misses contested storage patches, adjacent) |
+
+**v6 is the new ship candidate.** Severe misses corpus-wide: 3 (was 5
+at v5, 8+ at v3-on-corrected). The permission-gated destructive chain
+and the NL error-diagnostic severe misses are FIXED. Still standing:
+- the audit-log deletion pair (46/47) still lands informative top-1 —
+  Amy's "too subtle, settle for mutating" hunch was right at this data
+  dose; the consumer-side P(informative) gate is the mitigation, or a
+  bigger balanced audit slice / cost-sensitive loss are next levers.
+- the pipe-to-bash configmap row — gold label itself contested.
+Both eval-only slices improved WITHOUT training on them (form transfer,
+not instance leakage — the prompts never saw the test).
