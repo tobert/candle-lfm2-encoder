@@ -116,3 +116,33 @@ Ops note: 5 parallel luna consults tripped OpenAI's 200k TPM — two jobs
 died AFTER saving complete verdict artifacts (CAS made the failures
 free), two died mid-write and re-ran as half chunks. Run bulk luna
 passes ≤2 at a time.
+
+## v4 result (same recipe as v3, corrected labels, multi-model pool)
+
+val_acc 93.0. Evals (v3-on-corrected-labels vs v4):
+
+| set | v3 | v4 |
+|---|---|---|
+| kube_test (corrected) | 88.6% | 88.6% |
+| NL-assistant holdout | 85.0% | 81.7% (+1 severe) |
+| security-auditor holdout | 90.0% (3 severe) | 90.0% (3 severe) |
+| glm eval-only (adversarial chains) | 30.0% (5 severe) | 30.0% (5 severe) |
+| kimi eval-only (audit/storage/context) | 70.0% | 50.0% |
+
+**The form-coverage law confirmed a second time, from the other
+direction.** 161 multi-model rows of already-covered command-shaped
+forms bought nothing (test flat), diluted the NL fraction slightly (NL
+holdout −3.3), and the adversarial read-shaped-chain forms stayed
+broken at 3/10 — because we deliberately reserved them as eval-only, so
+the model never saw the FORM. Multi-family variance within a covered
+form is worth as little as persona variance was.
+
+**v3 remains the ship candidate.** v4's real value was validating the
+pipeline end-to-end on corrected labels.
+
+Path to v5: generate a TRAINING slice of the read-shaped-chain form
+(~100-150 fresh rows, multiple families: benign read chains AND chains
+ending in writes/exec-trailing risk, correctly labeled) while keeping
+the existing eval-only rows as the untouched holdout — cover the form,
+hold out the instances. Same play that fixed NL (25%→83%). Also rebalance
+NL fraction in the pool.
