@@ -146,3 +146,31 @@ ending in writes/exec-trailing risk, correctly labeled) while keeping
 the existing eval-only rows as the untouched holdout — cover the form,
 hold out the instances. Same play that fixed NL (25%→83%). Also rebalance
 NL fraction in the pool.
+
+## v5 result — the law pays out a third time
+
+New training data: 114 read-shaped-chain rows (deepseek 50, gpt-luna 39
+post-repair, kimi 25; gemini 503'd out and was not retried) + 60
+multi-family NL rows (deepseek, gpt-luna — first non-haiku NL in the
+corpus). GLM generated NONE of the chain rows (it authored the eval-only
+probes; no teaching to the test). Cross-review with no self-grading:
+luna checked deepseek+kimi (2 corrections, 1 unsure), GLM checked luna's
+(1 correction — cascade=orphan destructive→mutating), GLM arbitrated the
+unsure row (controller-owned force-delete → mutating). Pool: 1,788
+train / 204 val, 24 sources. val_acc 90.2.
+
+| set | v3 | v4 | v5 |
+|---|---|---|---|
+| kube_test (corrected) | 88.6% | 88.6% | 88.6% |
+| NL-assistant holdout | 85.0% (0 sev) | 81.7% (1 sev) | 85.0% (1 sev) |
+| security-auditor holdout | 90.0% (3 sev) | 90.0% (3 sev) | 90.0% (2 sev) |
+| glm eval-only (adversarial chains) | 30.0% (5 sev) | 30.0% (5 sev) | **60.0% (2 sev)** |
+| kimi eval-only | 70.0% | 50.0% | 60.0% |
+
+114 rows of the missing FORM doubled the adversarial slice and cut
+severe under-flags 5→2, with zero regression elsewhere — where 161 rows
+of covered-form variety (v4) moved nothing. **v5 is the new ship
+candidate.** Remaining known debts: 2 severe under-flags on adversarial
+chains, 2 on audit-deletion (still eval-only by design), 1 severe NL
+miss; all eval slices are small (N=10-88) — expanding them is the next
+measurement investment.
