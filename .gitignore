@@ -12,3 +12,4 @@
 /data
 /training/data
 *.jsonl
+__pycache__/
