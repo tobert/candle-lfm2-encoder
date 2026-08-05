@@ -1,9 +1,7 @@
 ---
 # DRAFT — Amy reviews everything below before anything is pushed.
-# License is deliberately unset: Amy picks (candidates: CC-BY-4.0,
-# CDLA-Permissive-2.0, Apache-2.0). `license: other` is a placeholder.
-license: other
-license_name: tbd-pending-review
+# License: CC-BY-4.0 (Amy's decision, 2026-08-05).
+license: cc-by-4.0
 task_categories:
   - text-classification
 language:
@@ -40,6 +38,14 @@ configs:
 ---
 
 # Agent Command Risk
+
+> **Status: proof of concept.** This dataset exists to answer research
+> questions about training small advisory risk classifiers — how much
+> synthetic data is useful, which kinds of diversity matter, where
+> single-generator labels break down — not to be a production-grade
+> benchmark or a definitive risk taxonomy. It is published for
+> reproducibility and scrutiny. Expect it to be revised or superseded;
+> read the Limitations section before building on it.
 
 Synthetic training and evaluation data for **advisory command-risk
 classifiers** — small encoder models that read a whole statement (a shell

@@ -1,9 +1,11 @@
 ---
-# DRAFT — Amy reviews before push. License MUST follow the base model's
-# terms (LiquidAI LFM Open License — verify derivative-weights clause
-# before choosing). Placeholder until then.
+# DRAFT — Amy reviews before push. Derivative of LiquidAI's encoder,
+# so the weights carry LFM Open License v1.0 (LICENSE file shipped in
+# this repo per its §4(a); see also the §5 $10M-revenue commercial
+# threshold, which recipients inherit).
 license: other
-license_name: tbd-pending-lfm-license-review
+license_name: lfm1.0
+license_link: LICENSE
 base_model: LiquidAI/LFM2.5-Encoder-350M
 language:
   - en
@@ -18,6 +20,11 @@ pipeline_tag: text-classification
 ---
 
 # LFM2.5-350M Command-Risk Classifier (kube-ordinal v3)
+
+> **Status: proof of concept**, like the dataset it was trained on —
+> published for reproducibility and scrutiny, not as a hardened
+> production guard. The Limitations sections here and in the dataset
+> card are the fine print that matters.
 
 An advisory whole-statement risk classifier: reads one statement — a
 kubectl/shell command, a script fragment, or a natural-language
@@ -77,6 +84,19 @@ persona variance, was the lever.
   Claude models (claude-haiku-4-5 for the persona corpus); labels follow
   a published house rubric; single-family caveat applies and is
   documented in the dataset card.
+
+## License and change notice
+
+These weights are a Derivative Work of
+[LiquidAI/LFM2.5-Encoder-350M](https://huggingface.co/LiquidAI/LFM2.5-Encoder-350M)
+under the **LFM Open License v1.0** (full text in this repo's `LICENSE`,
+as its §4(a) requires). Change notice per §4(b): relative to the base
+checkpoint, `model.safetensors` contains fully fine-tuned trunk weights
+plus a new `classifier.*` sequence-classification head, and
+`config.json` adds `architectures`, `id2label`/`label2id`, and
+`num_labels`; `tokenizer.json` is unmodified. Note the license's §5:
+Commercial Use is licensed only below a US$10M annual revenue threshold,
+and that condition flows through to these derivative weights.
 
 ## Files
 

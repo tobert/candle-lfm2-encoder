@@ -48,6 +48,7 @@ DATASET_FILES = {
 
 MODEL_SRC = DATA / "runs/kube_ordinal_v3"
 MODEL_FILES = ["config.json", "model.safetensors", "tokenizer.json"]
+BASE_CHECKPOINT = Path.home() / "src/candle-lfm2-encoder/.models/LFM2.5-Encoder-350M"
 
 
 def copy(src: Path, dst: Path) -> int:
@@ -79,6 +80,9 @@ def main() -> None:
     for name in MODEL_FILES:
         total += copy(MODEL_SRC / name, mdl / name)
     copy(HERE / "model_card.md", mdl / "README.md")
+    # LFM Open License v1.0 §4(a): derivative-weight distributions must
+    # include a copy of the base model's license.
+    copy(BASE_CHECKPOINT / "LICENSE", mdl / "LICENSE")
     cfg = json.loads((mdl / "config.json").read_text())
     assert cfg.get("id2label"), "export config lost id2label — refusing to stage"
     print(f"model staged: {total/1e9:.2f} GB, labels={list(cfg['id2label'].values())}")
