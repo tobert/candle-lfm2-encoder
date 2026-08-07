@@ -1,0 +1,233 @@
+{
+ "cases": [
+  {
+   "n": 0,
+   "name": "three_short_ascii_routes",
+   "routes": [
+    "billing",
+    "technical support",
+    "account access"
+   ],
+   "text": "I can't log into my account.",
+   "prefix": "Categories:\n- billing\n- technical support\n- account access\n\nText:\n",
+   "text_start": 66,
+   "category_ranges_char": [
+    [
+     14,
+     21
+    ],
+    [
+     24,
+     41
+    ],
+    [
+     44,
+     58
+    ]
+   ],
+   "route_results": [
+    {
+     "route": "account access",
+     "score": 0.8859255909919739
+    },
+    {
+     "route": "technical support",
+     "score": 0.05703737959265709
+    },
+    {
+     "route": "billing",
+     "score": 0.05703708156943321
+    }
+   ]
+  },
+  {
+   "n": 1,
+   "name": "eight_routes_long_prompt",
+   "routes": [
+    "billing and payments",
+    "technical support",
+    "account access",
+    "product feedback",
+    "sales inquiry",
+    "partnership request",
+    "security incident",
+    "general question"
+   ],
+   "text": "We have been experiencing intermittent connectivity issues with the API gateway since yesterday afternoon. Several of our automated jobs failed silently overnight, and this morning our monitoring dashboard showed a spike in 502 errors across three regions. The support ticket we opened last week about rate limiting has not received a response yet, and we are now concerned this might be related. Our engineering team has already checked the network configuration, rotated the API keys, and confirmed that the client library is on the latest version, but the errors persist. Could someone from your infrastructure team take a look at our account and let us know if there is a known outage or a configuration change on your end that might explain this behavior? We would appreciate a status update as soon as possible because this is impacting a production workload.",
+   "prefix": "Categories:\n- billing and payments\n- technical support\n- account access\n- product feedback\n- sales inquiry\n- partnership request\n- security incident\n- general question\n\nText:\n",
+   "text_start": 175,
+   "category_ranges_char": [
+    [
+     14,
+     34
+    ],
+    [
+     37,
+     54
+    ],
+    [
+     57,
+     71
+    ],
+    [
+     74,
+     90
+    ],
+    [
+     93,
+     106
+    ],
+    [
+     109,
+     128
+    ],
+    [
+     131,
+     148
+    ],
+    [
+     151,
+     167
+    ]
+   ],
+   "route_results": [
+    {
+     "route": "technical support",
+     "score": 0.6893283128738403
+    },
+    {
+     "route": "security incident",
+     "score": 0.04438729211688042
+    },
+    {
+     "route": "general question",
+     "score": 0.04438135400414467
+    },
+    {
+     "route": "account access",
+     "score": 0.04438093304634094
+    },
+    {
+     "route": "sales inquiry",
+     "score": 0.044380612671375275
+    },
+    {
+     "route": "product feedback",
+     "score": 0.04438057169318199
+    },
+    {
+     "route": "billing and payments",
+     "score": 0.04438047483563423
+    },
+    {
+     "route": "partnership request",
+     "score": 0.044380392879247665
+    }
+   ]
+  },
+  {
+   "n": 2,
+   "name": "single_route",
+   "routes": [
+    "general support"
+   ],
+   "text": "What are your business hours?",
+   "prefix": "Categories:\n- general support\n\nText:\n",
+   "text_start": 37,
+   "category_ranges_char": [
+    [
+     14,
+     29
+    ]
+   ],
+   "route_results": [
+    {
+     "route": "general support",
+     "score": 1.0
+    }
+   ]
+  },
+  {
+   "n": 3,
+   "name": "non_ascii_japanese",
+   "routes": [
+    "日本語の質問",
+    "billing"
+   ],
+   "text": "今日は元気ですか？ Also, what's the weather like in Tokyo? 東京の天気はどうですか。",
+   "prefix": "Categories:\n- 日本語の質問\n- billing\n\nText:\n",
+   "text_start": 38,
+   "category_ranges_char": [
+    [
+     14,
+     20
+    ],
+    [
+     23,
+     30
+    ]
+   ],
+   "route_results": [
+    {
+     "route": "日本語の質問",
+     "score": 0.93944251537323
+    },
+    {
+     "route": "billing",
+     "score": 0.06055748835206032
+    }
+   ],
+   "category_ranges_byte": [
+    [
+     14,
+     32
+    ],
+    [
+     35,
+     42
+    ]
+   ],
+   "offsets_unit_finding": "Python's offset_mapping (and _category_ranges, which uses plain str len()/slicing) are both CHARACTER-indexed (Unicode scalar values). Interpreting the same _category_ranges spans as BYTE offsets into the UTF-8 encoding of the prefix produces the wrong slice for the Japanese route (see category_ranges_byte vs category_ranges_char above) because Japanese characters are 3 bytes each in UTF-8 but 1 unit in char-indexing. char-offset interpretation reconstructs routes correctly: True."
+  },
+  {
+   "n": 4,
+   "name": "awkward_punctuation_route",
+   "routes": [
+    "billing",
+    "refund & return (RMA-#12345)",
+    "urgent!!! P0/outage???"
+   ],
+   "text": "My payment failed twice and I need a refund ASAP!!",
+   "prefix": "Categories:\n- billing\n- refund & return (RMA-#12345)\n- urgent!!! P0/outage???\n\nText:\n",
+   "text_start": 85,
+   "category_ranges_char": [
+    [
+     14,
+     21
+    ],
+    [
+     24,
+     52
+    ],
+    [
+     55,
+     77
+    ]
+   ],
+   "route_results": [
+    {
+     "route": "refund & return (RMA-#12345)",
+     "score": 0.8852795362472534
+    },
+    {
+     "route": "urgent!!! P0/outage???",
+     "score": 0.0573657862842083
+    },
+    {
+     "route": "billing",
+     "score": 0.057354625314474106
+    }
+   ]
+  }
+ ]
+}

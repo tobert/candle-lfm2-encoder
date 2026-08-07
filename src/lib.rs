@@ -18,8 +18,9 @@
 //!    against the checkpoint's own Python modeling code.
 //! 3. **Heads**, in order of use: pooled embedding (`Embedding-350M`),
 //!    token classification (`PII-Detector`, `Policy-Linter`), sequence
-//!    routing (`Prompt-Router` — rule-projection scoring, see its
-//!    `rule_proj_dim`; not a fixed-label softmax).
+//!    classification, sequence routing (`Prompt-Router` —
+//!    [`routing::Lfm2SequenceRouter`], rule-projection scoring against
+//!    caller-supplied routes; not a fixed-label softmax).
 //! 4. **Quantized loads** (GGUF) if CPU f16/f32 latency disappoints.
 //!
 //! ## Padding is not inert
@@ -44,6 +45,7 @@ pub mod colbert;
 pub mod embedding;
 pub mod error;
 mod labels;
+pub mod routing;
 pub mod sequence_classification;
 pub mod token_classification;
 pub mod trunk;
@@ -52,6 +54,7 @@ pub use config::{EncoderArch, LayerType, Lfm2EncoderConfig};
 pub use colbert::{ColbertModel, MultiVector};
 pub use embedding::{cosine_similarity, Lfm2Embedding, TextKind};
 pub use error::{Error, Result};
+pub use routing::{Lfm2SequenceRouter, RouteComputation, RouteMatch};
 pub use sequence_classification::Lfm2SequenceClassifier;
 pub use token_classification::{Lfm2TokenClassifier, Span};
 pub use trunk::Lfm2Trunk;

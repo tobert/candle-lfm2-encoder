@@ -33,6 +33,16 @@ pub enum Error {
     #[error("tokenizing: {0}")]
     Encode(String),
 
+    /// A caller-supplied argument that is structurally invalid for the
+    /// requested operation — e.g. an empty routes list handed to
+    /// [`crate::routing::Lfm2SequenceRouter`], which LiquidAI's Python
+    /// `route()` accepts and silently degrades into a one-category
+    /// `"- (none)"` prompt. We refuse instead: there is no sound score to
+    /// report for zero routes, and a degenerate prefix would produce a
+    /// number that looks like an answer.
+    #[error("{0}")]
+    InvalidInput(String),
+
     #[error(transparent)]
     Candle(#[from] candle_core::Error),
 }

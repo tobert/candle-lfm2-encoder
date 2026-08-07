@@ -214,6 +214,16 @@ impl Lfm2EncoderConfig {
         scaled.div_ceil(self.block_multiple_of) * self.block_multiple_of
     }
 
+    /// Dimension of the rule-projection space the routing/rule-matching
+    /// heads score in. `None` when the key is absent from `config.json`;
+    /// the Python head reads it as `getattr(config, "rule_proj_dim", 256)`,
+    /// so 256 is the default here too, not an error — every shipped
+    /// checkpoint carries the key explicitly (256), but a future one might
+    /// rely on the default the way the Python code allows.
+    pub fn rule_proj_dim(&self) -> usize {
+        self.rule_proj_dim.unwrap_or(256)
+    }
+
     /// Number of classification labels, when this checkpoint has a label
     /// head. `None` (not zero) for label-less checkpoints — a caller
     /// building a classifier over an embedding checkpoint should fail
