@@ -45,10 +45,22 @@ struct PromptCase {
     expect: Option<String>,
 }
 
+/// One decomposed statement: the whole thing, and the clauses a real parser
+/// says it contains. `clauses` comes from kaish `Plan.commands[]` — this
+/// example does not split text itself, and neither does the crate (see
+/// `Lfm2SequenceRouter::route_clauses`).
+#[derive(Deserialize)]
+struct ClauseCase {
+    statement: String,
+    expect: Option<String>,
+    clauses: Vec<String>,
+}
+
 fn usage_and_exit() -> ! {
     eprintln!(
         "usage: route <checkpoint-dir> [--route TEXT]... [--routes-file routes.json] \
-         [--prompts-file prompts.json] [--threshold F] [--scores] [prompt text]"
+         [--prompts-file prompts.json] [--clauses-file clauses.json] [--threshold F] \
+         [--scores] [--all-scores] [prompt text]"
     );
     std::process::exit(2);
 }
@@ -63,8 +75,10 @@ fn main() -> candle_lfm2_encoder::Result<()> {
     let mut routes: Vec<String> = Vec::new();
     let mut routes_file: Option<String> = None;
     let mut prompts_file: Option<String> = None;
+    let mut clauses_file: Option<String> = None;
     let mut threshold: Option<f32> = None;
     let mut show_scores = false;
+    let mut all_scores = false;
     let mut positional: Vec<String> = Vec::new();
 
     let mut i = 1;
@@ -103,8 +117,19 @@ fn main() -> candle_lfm2_encoder::Result<()> {
                 }));
                 i += 2;
             }
+            "--clauses-file" => {
+                clauses_file = Some(args.get(i + 1).cloned().unwrap_or_else(|| {
+                    eprintln!("--clauses-file needs a path");
+                    std::process::exit(2);
+                }));
+                i += 2;
+            }
             "--scores" => {
                 show_scores = true;
+                i += 1;
+            }
+            "--all-scores" => {
+                all_scores = true;
                 i += 1;
             }
             other => {
@@ -140,11 +165,12 @@ fn main() -> candle_lfm2_encoder::Result<()> {
     );
     println!("routes: {}", routes.join(" | "));
 
-    match prompts_file {
-        Some(path) => run_batch(&model, &path, &routes, show_scores),
-        None => {
+    match (clauses_file, prompts_file) {
+        (Some(path), _) => run_clauses(&model, &path, &routes, all_scores, threshold),
+        (None, Some(path)) => run_batch(&model, &path, &routes, show_scores, all_scores),
+        (None, None) => {
             if positional.is_empty() {
-                eprintln!("no prompt text given (and no --prompts-file)");
+                eprintln!("no prompt text given (and no --prompts-file/--clauses-file)");
                 std::process::exit(2);
             }
             let text = positional.join(" ");
@@ -152,6 +178,195 @@ fn main() -> candle_lfm2_encoder::Result<()> {
         }
     }
     Ok(())
+}
+
+/// Route each statement two ways — whole, and clause by clause — and print
+/// both, so the comparison the fan-out analysis needs is one run.
+///
+/// Cosines throughout, never probabilities: this head's softmax is a pure
+/// function of route count (see the crate's `routing` module docs), so it
+/// carries no confidence at all, and across clauses it is worse than
+/// meaningless — every clause renormalizes over the same lanes, so a clause
+/// with no intent still hands its best lane a large share.
+fn run_clauses(
+    model: &Lfm2SequenceRouter,
+    path: &str,
+    routes: &[String],
+    all_scores: bool,
+    threshold: Option<f32>,
+) {
+    let bytes = std::fs::read(path).unwrap_or_else(|e| {
+        eprintln!("reading {path}: {e}");
+        std::process::exit(1);
+    });
+    let cases: Vec<ClauseCase> = serde_json::from_slice(&bytes).unwrap_or_else(|e| {
+        eprintln!("parsing {path} as a JSON array of {{statement, expect?, clauses}}: {e}");
+        std::process::exit(1);
+    });
+
+    let mut joint_correct = 0usize;
+    let mut union_correct = 0usize;
+    let mut checked = 0usize;
+    // Statements where decomposition changed the answer, either way.
+    let mut fixed: Vec<&str> = Vec::new();
+    let mut broken: Vec<&str> = Vec::new();
+    // Top-1 is the wrong question for a statement with two real intents —
+    // one of them must lose an argmax no matter how well both were
+    // detected. What a fan-out cascade actually needs is RECALL: did the
+    // expected lane clear a threshold at all? Collected as (joint, union)
+    // cosines on the expected lane so any threshold can be swept after.
+    let mut expected_cosines: Vec<(f32, f32)> = Vec::new();
+
+    println!("\n{} statements, clause-decomposed:\n", cases.len());
+    let t = Instant::now();
+
+    for case in &cases {
+        let joint = match model.route_cosines(&case.statement, routes) {
+            Ok(c) => c,
+            Err(e) => {
+                println!("  ERROR (joint) {:?}: {e}", case.statement);
+                continue;
+            }
+        };
+        let split = match model.route_clauses(&case.clauses, routes) {
+            Ok(s) => s,
+            Err(e) => {
+                println!("  ERROR (clauses) {:?}: {e}", case.statement);
+                continue;
+            }
+        };
+
+        let joint_top = argmax(&joint);
+        let union_top = argmax(&split.union_cosines);
+
+        let mark = match &case.expect {
+            Some(expect) => {
+                checked += 1;
+                if let Some(lane) = routes.iter().position(|r| r == expect) {
+                    expected_cosines.push((joint[lane], split.union_cosines[lane]));
+                } else {
+                    eprintln!(
+                        "expect {expect:?} is not one of the routes — recall cannot be \
+                         measured for {:?}",
+                        case.statement
+                    );
+                    std::process::exit(2);
+                }
+                let j = expect == &routes[joint_top];
+                let u = expect == &routes[union_top];
+                if j {
+                    joint_correct += 1;
+                }
+                if u {
+                    union_correct += 1;
+                }
+                match (j, u) {
+                    (false, true) => {
+                        fixed.push(&case.statement);
+                        "FIXED "
+                    }
+                    (true, false) => {
+                        broken.push(&case.statement);
+                        "BROKE "
+                    }
+                    (true, true) => "both  ",
+                    (false, false) => "neither",
+                }
+            }
+            None => "      ",
+        };
+
+        println!("  {mark} {:?}", case.statement);
+        if let (Some(&(j, u)), Some(expect)) = (expected_cosines.last(), case.expect.as_deref()) {
+            println!("         expected lane: joint {j:>7.4} → union {u:>7.4}   ({expect})");
+        }
+        println!(
+            "         joint  {:>7.4}  {}",
+            joint[joint_top], routes[joint_top]
+        );
+        let fired = split.firing_clause(union_top).unwrap_or(0);
+        println!(
+            "         union  {:>7.4}  {}   (from clause {fired}: {:?})",
+            split.union_cosines[union_top], routes[union_top], case.clauses[fired]
+        );
+        if let Some(t) = threshold {
+            let lanes = split.lanes_above(t);
+            println!(
+                "         lanes >= {t}: {}",
+                lanes
+                    .iter()
+                    .map(|&l| format!("{} ({:.4})", routes[l], split.union_cosines[l]))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
+        }
+        for (ci, clause) in case.clauses.iter().enumerate() {
+            let row = &split.clause_cosines[ci];
+            let top = argmax(row);
+            if all_scores {
+                println!("           [{ci}] {clause:?}");
+                for (r, route) in routes.iter().enumerate() {
+                    println!("               {:>7.4}  {route}", row[r]);
+                }
+            } else {
+                println!(
+                    "           [{ci}] {:>7.4}  {:<24} {clause:?}",
+                    row[top], routes[top]
+                );
+            }
+        }
+        println!();
+    }
+
+    let elapsed = t.elapsed();
+    println!(
+        "{} statements in {:.2?} ({:.1?}/statement)",
+        cases.len(),
+        elapsed,
+        elapsed / cases.len().max(1) as u32
+    );
+
+    if checked > 0 {
+        let pct = |n: usize| 100.0 * n as f64 / checked as f64;
+        println!(
+            "\ntop-1 accuracy over {checked} statements:\n  \
+             whole statement: {joint_correct}/{checked} ({:.1}%)\n  \
+             clause union:    {union_correct}/{checked} ({:.1}%)",
+            pct(joint_correct),
+            pct(union_correct)
+        );
+        if !fixed.is_empty() {
+            println!("\nfixed by decomposition ({}):", fixed.len());
+            for s in &fixed {
+                println!("  + {s:?}");
+            }
+        }
+        if !broken.is_empty() {
+            println!("\nbroken by decomposition ({}):", broken.len());
+            for s in &broken {
+                println!("  - {s:?}");
+            }
+        }
+
+        println!("\nrecall of the expected lane (does it clear the bar at all?):");
+        println!("  {:>10}  {:>12}  {:>12}", "threshold", "whole stmt", "clause union");
+        for t in [0.9_f32, 0.5, 0.25, 0.0, -0.25] {
+            let j = expected_cosines.iter().filter(|(c, _)| *c >= t).count();
+            let u = expected_cosines.iter().filter(|(_, c)| *c >= t).count();
+            println!("  {t:>10.2}  {j:>7}/{checked}  {u:>9}/{checked}");
+        }
+        let gained = expected_cosines.iter().filter(|(j, u)| u > j).count();
+        let lost = expected_cosines.iter().filter(|(j, u)| u < j).count();
+        println!(
+            "  expected-lane cosine rose on {gained}/{checked}, fell on {lost}/{checked}"
+        );
+    }
+}
+
+fn argmax(cosines: &[f32]) -> usize {
+    (0..cosines.len())
+        .max_by(|&a, &b| cosines[a].total_cmp(&cosines[b]))
+        .unwrap_or(0)
 }
 
 fn print_ranked(model: &Lfm2SequenceRouter, text: &str, routes: &[String], show_scores: bool) -> candle_lfm2_encoder::Result<()> {
@@ -200,7 +415,13 @@ fn run_single(
     Ok(())
 }
 
-fn run_batch(model: &Lfm2SequenceRouter, path: &str, routes: &[String], show_scores: bool) {
+fn run_batch(
+    model: &Lfm2SequenceRouter,
+    path: &str,
+    routes: &[String],
+    show_scores: bool,
+    all_scores: bool,
+) {
     let bytes = std::fs::read(path).unwrap_or_else(|e| {
         eprintln!("reading {path}: {e}");
         std::process::exit(1);
@@ -266,6 +487,20 @@ fn run_batch(model: &Lfm2SequenceRouter, path: &str, routes: &[String], show_sco
             "  {mark}  {:>7.4}{score_str}  {:<24} {margin_str}  {text_preview:?}",
             top_prob, routes[top_idx]
         );
+
+        // Every lane's raw cosine, for fan-out work: the top-1 line above
+        // says nothing about whether a second lane also fired, and the
+        // softmax cannot be asked (route-count arithmetic, see the header).
+        if all_scores {
+            match model.route_cosines(&case.text, routes) {
+                Ok(cosines) => {
+                    for (r, route) in routes.iter().enumerate() {
+                        println!("           cos {:>7.4}  {route}", cosines[r]);
+                    }
+                }
+                Err(e) => println!("           cosines unavailable: {e}"),
+            }
+        }
     }
     let elapsed = t.elapsed();
 

@@ -54,7 +54,7 @@ pub use config::{EncoderArch, LayerType, Lfm2EncoderConfig};
 pub use colbert::{ColbertModel, MultiVector};
 pub use embedding::{cosine_similarity, Lfm2Embedding, TextKind};
 pub use error::{Error, Result};
-pub use routing::{Lfm2SequenceRouter, RouteComputation, RouteMatch};
+pub use routing::{ClauseRouting, Lfm2SequenceRouter, RouteComputation, RouteMatch};
 pub use sequence_classification::Lfm2SequenceClassifier;
 pub use token_classification::{Lfm2TokenClassifier, Span};
 pub use trunk::Lfm2Trunk;

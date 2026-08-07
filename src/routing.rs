@@ -741,9 +741,115 @@ impl Lfm2SequenceRouter {
         Ok(matches)
     }
 
+    /// Route each clause of a decomposed statement separately, then union
+    /// the results — the answer to "one pooled vector carries one intent"
+    /// (see [`ClauseRouting`] and the module docs' fan-out section).
+    ///
+    /// One trunk pass per clause: this costs `clauses.len()` forward passes,
+    /// not one. That is the price of the second intent; a statement's
+    /// clause count is small (the 15 hardest probes in
+    /// `training/router/` decompose to 1–4).
+    ///
+    /// `clauses` must come from a real parser — kaish's
+    /// `plan_statement` (`Plan.commands[]`) is what this was built against.
+    /// This crate deliberately ships NO splitter: a regex that splits on
+    /// `&&` and `|` would disagree with the parser that actually decides
+    /// what runs, and disagreeing about clause boundaries is exactly the
+    /// silent-wrong-answer shape the whole crate refuses. Feed it real
+    /// clauses or feed it the whole statement as one clause.
+    ///
+    /// Errors on an empty `clauses` (nothing to route — an empty union
+    /// would read as "no intent detected", which is the most dangerous
+    /// possible thing to say about a statement nobody looked at) and on an
+    /// empty `routes`, same as every other method here.
+    pub fn route_clauses<C: AsRef<str>, S: AsRef<str>>(
+        &self,
+        clauses: &[C],
+        routes: &[S],
+    ) -> Result<ClauseRouting> {
+        if clauses.is_empty() {
+            return Err(Error::InvalidInput(
+                "route_clauses needs at least one clause: an empty clause list has no \
+                 union to report, and reporting one would say 'no intent' about a \
+                 statement that was never scored"
+                    .into(),
+            ));
+        }
+        require_nonempty_routes(routes)?;
+
+        let clause_cosines: Vec<Vec<f32>> = clauses
+            .iter()
+            .map(|c| self.route_cosines(c.as_ref(), routes))
+            .collect::<Result<_>>()?;
+
+        // Max, not mean: a lane fires if ANY clause fires it. Averaging
+        // would let three benign clauses dilute one destructive one — the
+        // same dilution the windowing experiment already measured, moved
+        // one level up.
+        let mut union_cosines = vec![f32::NEG_INFINITY; routes.len()];
+        for row in &clause_cosines {
+            for (lane, &cos) in row.iter().enumerate() {
+                union_cosines[lane] = union_cosines[lane].max(cos);
+            }
+        }
+
+        Ok(ClauseRouting {
+            clause_cosines,
+            union_cosines,
+        })
+    }
+
     /// The underlying trunk, for callers that want raw hidden states.
     pub fn trunk(&self) -> &Lfm2Trunk {
         &self.trunk
+    }
+}
+
+/// One statement's routing, computed clause by clause.
+///
+/// Whole-statement routing suppresses every intent but one: on
+/// `git clone … && npm install` the package lane reads +0.95 while git
+/// reads **−0.93**, and no threshold recovers a lane that is confidently
+/// negative. The suppression happens in the pooled representation, upstream
+/// of both the softmax and the cosine, so the only place to fix it is
+/// upstream of the model — route the clauses, union the answers.
+///
+/// Cosines, never probabilities: this head's softmax is a pure function of
+/// route count and carries no confidence at all (module docs, finding 2).
+/// Across clauses it would be worse than useless — each clause's softmax
+/// renormalizes over the same lanes, so a clause with no real intent still
+/// hands its highest lane a large share.
+#[derive(Debug, Clone)]
+pub struct ClauseRouting {
+    /// Raw cosines per clause, `[n_clauses][n_routes]`, both in input
+    /// order. Kept rather than folded away: which clause fired a lane is
+    /// the thing a gate explains itself with, and a union alone cannot say.
+    pub clause_cosines: Vec<Vec<f32>>,
+    /// Per-lane max over clauses, `[n_routes]` — a lane fires if any clause
+    /// fires it. Not a distribution and does not sum to anything.
+    pub union_cosines: Vec<f32>,
+}
+
+impl ClauseRouting {
+    /// Lane indices whose union cosine is at least `threshold`, in
+    /// descending score order. The fan-out analysis found no usable global
+    /// threshold on whole statements (best balance still missed 35–40% of
+    /// correct lanes); the caller picks one and owns that choice.
+    pub fn lanes_above(&self, threshold: f32) -> Vec<usize> {
+        let mut lanes: Vec<usize> = (0..self.union_cosines.len())
+            .filter(|&i| self.union_cosines[i] >= threshold)
+            .collect();
+        lanes.sort_by(|&a, &b| self.union_cosines[b].total_cmp(&self.union_cosines[a]));
+        lanes
+    }
+
+    /// Which clause supplied lane `lane`'s union score, as an index into
+    /// [`Self::clause_cosines`]. The provenance a gate quotes when it
+    /// explains why it fired.
+    pub fn firing_clause(&self, lane: usize) -> Option<usize> {
+        (0..self.clause_cosines.len()).max_by(|&a, &b| {
+            self.clause_cosines[a][lane].total_cmp(&self.clause_cosines[b][lane])
+        })
     }
 }
 
