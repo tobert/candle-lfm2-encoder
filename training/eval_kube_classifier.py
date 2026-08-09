@@ -16,6 +16,7 @@ from safetensors.torch import load_file
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+import calib_metrics  # noqa: E402
 from finetune_sequence_classifier import (  # noqa: E402
     Lfm2ForSequenceClassification,
     dot_free_checkpoint_dir,
@@ -52,6 +53,7 @@ def main() -> None:
     print(f"test rows: {len(rows)}  labels: {sorted(label2id)}")
 
     preds = []
+    probs = []  # per-row softmax distribution, aligned with `preds`
     with torch.no_grad():
         for i in range(0, len(rows), args.batch_size):
             batch = rows[i:i + args.batch_size]
@@ -59,8 +61,9 @@ def main() -> None:
                 [r["text"] for r in batch], padding=True, truncation=True,
                 max_length=args.max_len, return_tensors="pt",
             ).to(device)
-            logits = model(enc["input_ids"], enc["attention_mask"])
-            preds.extend(logits.float().argmax(-1).tolist())
+            logits = model(enc["input_ids"], enc["attention_mask"]).float()
+            preds.extend(logits.argmax(-1).tolist())
+            probs.extend(torch.softmax(logits, dim=-1).tolist())
 
     total = correct = 0
     by_slice = defaultdict(lambda: [0, 0])
@@ -68,7 +71,18 @@ def main() -> None:
     confusion = Counter()
     sev_dist = Counter()
     wrong_refs = []
-    for lineno, (r, p_id) in enumerate(zip(rows, preds), 1):
+
+    # v7 calibration accumulators — only populated for rows carrying an
+    # optional "target" distribution; rows without it never touch these,
+    # so eval on legacy test files is unaffected.
+    calib_total = 0
+    unanimous_conf = []
+    split_conf = []
+    ece_confidences = []
+    ece_correct = []  # top-1 label vs. argmax(target) ("majority label")
+    ce_pairs = []  # (pred_dist, target_dist) for mean cross-entropy
+
+    for lineno, (r, p_id, row_probs) in enumerate(zip(rows, preds, probs), 1):
         gold, pred = r["label"], id2label[p_id]
         ok = gold == pred
         total += 1
@@ -83,6 +97,22 @@ def main() -> None:
                 f"line {lineno}: {r.get('slice')}/{r.get('verb')} {r.get('resource')} "
                 f"gold={gold} pred={pred}" + (" (contested)" if r.get("contested") else "")
             )
+
+        target = r.get("target")
+        if target:
+            calib_total += 1
+            pred_dist = {id2label[j]: row_probs[j] for j in range(len(id2label))}
+            top1_prob = pred_dist[pred]
+            majority = calib_metrics.argmax_label(target)
+
+            if calib_metrics.is_unanimous(target):
+                unanimous_conf.append(top1_prob)
+            else:
+                split_conf.append(top1_prob)
+
+            ece_confidences.append(top1_prob)
+            ece_correct.append(pred == majority)
+            ce_pairs.append((pred_dist, target))
 
     print(f"\noverall accuracy: {correct}/{total} = {correct/total:.1%}")
     print("\nper-slice:")
@@ -110,6 +140,32 @@ def main() -> None:
     print(f"\nmisclassified rows ({len(wrong_refs)}) by metadata ref (no text):")
     for ref in wrong_refs:
         print(f"  {ref}")
+
+    if calib_total:
+        n_unanimous, n_split = len(unanimous_conf), len(split_conf)
+        print(f"\ncalibration (target-bearing rows: {calib_total}/{total}):")
+        print(f"  unanimous: {n_unanimous}  split: {n_split}")
+
+        if n_unanimous and n_split:
+            sep = calib_metrics.separation(unanimous_conf, split_conf)
+            print(f"  separation (unanimous top-1 mean - split top-1 mean): {sep:+.3f}")
+        else:
+            print("  separation: n/a (need >=1 unanimous and >=1 split row)")
+
+        if n_split:
+            oc = calib_metrics.overconfident_split_count(split_conf)
+            print(
+                f"  overconfident splits (top-1 >= {calib_metrics.OVERCONFIDENT_THRESHOLD:.2f}): "
+                f"{oc}/{n_split} = {oc/n_split:.1%}"
+            )
+        else:
+            print("  overconfident splits: n/a (no split rows)")
+
+        ece = calib_metrics.expected_calibration_error(ece_confidences, ece_correct)
+        print(f"  ECE ({calib_metrics.ECE_BINS} bins, top-1 vs majority label): {ece:.4f}")
+
+        mce = calib_metrics.mean_cross_entropy(ce_pairs)
+        print(f"  mean cross-entropy (pred dist vs target dist): {mce:.4f}")
 
 
 if __name__ == "__main__":

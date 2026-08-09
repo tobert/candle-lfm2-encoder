@@ -115,6 +115,36 @@ def load_backbone(base_dir: Path):
 # --------------------------------------------------------------------------
 
 
+TARGET_SUM_TOLERANCE = 1e-6
+
+
+def _validate_target_row(target: object, context: str) -> dict[str, float]:
+    """Validate one row's `"target"` field in isolation (no access to the
+    global label set yet — that check happens later, once the label order
+    is known, via `validate_target_keys`). Fails loudly: a malformed target
+    is a data bug, not something to coerce or drop silently.
+    """
+    if not isinstance(target, dict) or isinstance(target, (list, tuple)):
+        raise ValueError(f"{context}: target must be an object, got {type(target).__name__}")
+    if not target:
+        raise ValueError(f"{context}: target must not be empty")
+    normalized: dict[str, float] = {}
+    for key, value in target.items():
+        if not isinstance(key, str):
+            raise ValueError(f"{context}: target keys must be strings, got {type(key).__name__}")
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise ValueError(
+                f"{context}: target[{key!r}] must be numeric, got {type(value).__name__}"
+            )
+        normalized[key] = float(value)
+    total = sum(normalized.values())
+    if abs(total - 1.0) > TARGET_SUM_TOLERANCE:
+        raise ValueError(
+            f"{context}: target values sum to {total} (expected 1.0 ± {TARGET_SUM_TOLERANCE})"
+        )
+    return normalized
+
+
 def load_jsonl(path: Path) -> list[dict]:
     items = []
     with open(path, "r", encoding="utf-8") as f:
@@ -131,10 +161,78 @@ def load_jsonl(path: Path) -> list[dict]:
                 raise ValueError(
                     f"{path}:{lineno}: label must be a string, got {type(obj['label']).__name__}"
                 )
-            items.append({"text": str(obj["text"]), "label": obj["label"]})
+            target = None
+            if "target" in obj:
+                target = _validate_target_row(obj["target"], f"{path}:{lineno}")
+            items.append({"text": str(obj["text"]), "label": obj["label"], "target": target})
     if not items:
         raise ValueError(f"{path}: no examples found")
     return items
+
+
+def resolve_label_order(items: list[dict], explicit_order: list[str] | None = None) -> list[str]:
+    """Decide the fixed 0..N-1 label order used everywhere downstream
+    (label2id/id2label, classifier head width and slot assignment).
+
+    Default (unchanged from before `target` existed): sort the labels
+    observed in `items`. Pass `explicit_order` to pin the order instead
+    (e.g. the v7 ordinal axis 0=informative/1=situation-normal/
+    2=data-critical) rather than letting data order or alphabetical
+    sorting decide it — `explicit_order` may also list classes with zero
+    rows in `items`, which is how a fixed-width head survives an uneven
+    split. Fails loudly on duplicates or on an observed label the
+    explicit order doesn't account for.
+    """
+    observed = {item["label"] for item in items}
+    if explicit_order is None:
+        return sorted(observed)
+    order = list(explicit_order)
+    if len(order) != len(set(order)):
+        raise ValueError(f"explicit label order contains duplicates: {order}")
+    unaccounted = observed - set(order)
+    if unaccounted:
+        raise ValueError(
+            f"training data contains labels not present in the explicit label order: "
+            f"{sorted(unaccounted)} (explicit order: {order})"
+        )
+    return order
+
+
+def validate_target_keys(items: list[dict], label_set: set[str], source: str) -> None:
+    """Second-stage target validation: per-row shape (dict, numeric,
+    sums to 1) is already checked by `load_jsonl`; this checks each
+    target's keys are a subset of the resolved label set, which isn't
+    known until label order is resolved across the whole file. Fails
+    loudly rather than silently dropping unknown classes.
+    """
+    for i, item in enumerate(items):
+        target = item.get("target")
+        if target is None:
+            continue
+        unknown = set(target) - label_set
+        if unknown:
+            raise ValueError(
+                f"{source} item {i}: target keys {sorted(unknown)} not in label set "
+                f"{sorted(label_set)}"
+            )
+
+
+def target_to_vector(
+    label_id: int, target: dict[str, float] | None, label2id: dict[str, int]
+) -> torch.Tensor:
+    """Build the per-row soft-target distribution the loss trains against,
+    in label2id's fixed slot order. Rows without a `"target"` field get an
+    exact one-hot at their majority `label_id` — this is what makes the
+    soft-target loss collapse to today's hard cross-entropy for old-style
+    rows (see the numeric equivalence test).
+    """
+    vec = torch.zeros(len(label2id), dtype=torch.float32)
+    if target is None:
+        vec[label_id] = 1.0
+    else:
+        for label, prob in target.items():
+            vec[label2id[label]] = prob
+    return vec
 
 
 class ClassificationDataset(Dataset):
@@ -147,12 +245,14 @@ class ClassificationDataset(Dataset):
 
     def __getitem__(self, idx: int):
         item = self.items[idx]
-        return item["text"], self.label2id[item["label"]]
+        label_id = self.label2id[item["label"]]
+        target_vec = target_to_vector(label_id, item.get("target"), self.label2id)
+        return item["text"], label_id, target_vec
 
 
 def make_collate(tokenizer, max_len: int):
     def collate(batch):
-        texts, labels = zip(*batch)
+        texts, labels, targets = zip(*batch)
         enc = tokenizer(
             list(texts),
             padding=True,
@@ -160,7 +260,7 @@ def make_collate(tokenizer, max_len: int):
             max_length=max_len,
             return_tensors="pt",
         )
-        return enc, torch.tensor(labels, dtype=torch.long)
+        return enc, torch.tensor(labels, dtype=torch.long), torch.stack(targets)
 
     return collate
 
@@ -193,6 +293,19 @@ class Lfm2ForSequenceClassification(nn.Module):
 # --------------------------------------------------------------------------
 
 
+def soft_cross_entropy(logits: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
+    """-sum(target * log_softmax(logits)), averaged over the batch.
+
+    `targets` is a [batch, num_labels] probability distribution (rows sum
+    to 1). When every row is an exact one-hot (the case for all "label"-
+    only data, old and new), this is numerically identical to
+    `nn.functional.cross_entropy(logits, hard_labels)` — see
+    `test_soft_targets.py`'s one-hot-equivalence test.
+    """
+    log_probs = torch.log_softmax(logits, dim=-1)
+    return -(targets * log_probs).sum(dim=-1).mean()
+
+
 @torch.no_grad()
 def evaluate(model, loader, device, autocast_dtype, labels_sorted: list[str]):
     model.eval()
@@ -203,7 +316,7 @@ def evaluate(model, loader, device, autocast_dtype, labels_sorted: list[str]):
     fn: Counter = Counter()
     support: Counter = Counter()
 
-    for enc, labels in loader:
+    for enc, labels, _targets in loader:
         input_ids = enc["input_ids"].to(device)
         attention_mask = enc["attention_mask"].to(device)
         labels = labels.to(device)
@@ -299,6 +412,18 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--max-len", type=int, default=256)
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--warmup-ratio", type=float, default=0.06)
+    p.add_argument(
+        "--label-order",
+        type=str,
+        default=None,
+        help=(
+            "comma-separated explicit label order, e.g. "
+            "'informative,situation-normal,data-critical'. Fixes id2label's slot "
+            "assignment instead of deriving it by sorting labels observed in "
+            "--train; may include a class with zero training rows. Default: "
+            "sorted(observed labels), unchanged from before this flag existed."
+        ),
+    )
     return p.parse_args()
 
 
@@ -318,7 +443,8 @@ def main() -> None:
     train_items = load_jsonl(args.train)
     val_items = load_jsonl(args.val)
 
-    labels_sorted = sorted({item["label"] for item in train_items})
+    explicit_order = args.label_order.split(",") if args.label_order else None
+    labels_sorted = resolve_label_order(train_items, explicit_order)
     val_labels = {item["label"] for item in val_items}
     unseen = val_labels - set(labels_sorted)
     if unseen:
@@ -331,6 +457,10 @@ def main() -> None:
     id2label = {str(i): label for label, i in label2id.items()}
     print(f"labels ({len(labels_sorted)}): {labels_sorted}")
     print(f"train examples: {len(train_items)}  val examples: {len(val_items)}")
+
+    label_set = set(labels_sorted)
+    validate_target_keys(train_items, label_set, str(args.train))
+    validate_target_keys(val_items, label_set, str(args.val))
 
     base_dir = dot_free_checkpoint_dir(args.base)
     tokenizer = AutoTokenizer.from_pretrained(str(base_dir))
@@ -372,17 +502,18 @@ def main() -> None:
         model.train()
         total_loss = 0.0
         n_batches = 0
-        for enc, labels in train_loader:
+        for enc, labels, targets in train_loader:
             input_ids = enc["input_ids"].to(device)
             attention_mask = enc["attention_mask"].to(device)
             labels = labels.to(device)
+            targets = targets.to(device)
 
             optimizer.zero_grad(set_to_none=True)
             with torch.autocast(
                 device_type=device.type, dtype=autocast_dtype, enabled=device.type == "cuda"
             ):
                 logits = model(input_ids, attention_mask)
-                loss = nn.functional.cross_entropy(logits, labels)
+                loss = soft_cross_entropy(logits.float(), targets)
 
             if use_scaler:
                 scaler.scale(loss).backward()
