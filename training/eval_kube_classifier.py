@@ -24,7 +24,11 @@ from finetune_sequence_classifier import (  # noqa: E402
 )
 from transformers import AutoTokenizer  # noqa: E402
 
-SEVERITY = {"informative": 0, "mutating": 1, "destructive": 2}
+# one ordinal map spanning both label vocabularies (v6 mutating/destructive,
+# v7 situation-normal/data-critical) — same ranks, so mixed gold/pred pairs
+# still measure distance; unknown labels fail loudly at the lookup
+SEVERITY = {"informative": 0, "mutating": 1, "situation-normal": 1,
+            "destructive": 2, "data-critical": 2}
 
 
 def main() -> None:

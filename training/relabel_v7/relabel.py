@@ -106,7 +106,10 @@ def fold_votes(ids: list[str], reviewers: dict[str, dict[str, str]]) -> dict[str
             target[l] += 1.0 / len(votes)
         folded[i] = {
             "label": label,
-            "target": {l: round(p, 6) for l, p in target.items()},
+            # full precision — rounding to 6 places made a 3-way split's
+            # thirds sum to 0.999999, tripping the trainer's (correct)
+            # 1e-6 target-sum gate
+            "target": dict(target),
             "votes": votes,
             "contested": len(set(votes.values())) > 1,
         }
