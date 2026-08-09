@@ -100,7 +100,7 @@ for band, title, blurb in BANDS:
         w(f"- note — {c['note']}")
         w(f"- mine: **{c['proposed']}** · escalate: **{esc}** · "
           f"v6 today: {c['_v6']} {c['_v6p']:.3f}")
-        w("- **gold:** &nbsp;&nbsp;&nbsp; **escalate:** &nbsp;&nbsp;&nbsp; *(notes: )*")
+        w("- **gold:** ____  **escalate:** ____  *(notes: )*")
         w("")
     w("---")
     w("")
