@@ -11,10 +11,11 @@
 //! not return plausible numbers. Each test names the corruption it prevents.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use ahash::AHashMap;
 use candle_core::{DType, Device, Tensor};
-use candle_lfm2_encoder::Lfm2SequenceClassifier;
+use candle_lfm2_encoder::{Lfm2SequenceClassifier, Lfm2Trunk};
 use tokenizers::models::wordlevel::WordLevel;
 use tokenizers::pre_tokenizers::whitespace::Whitespace;
 use tokenizers::Tokenizer;
@@ -247,4 +248,71 @@ fn predict_label_matches_the_argmax_of_predict() {
     // Pinned by construction (see the doc comment above) — not just
     // internally consistent, but the specific class the bias favors.
     assert_eq!(label, "dangerous");
+}
+
+/// A config JSON shaped like [`tiny_config_json`], but with an
+/// independently chosen `hidden_size`/head geometry — used only to build a
+/// checkpoint whose trunk SHAPE disagrees with the standard tiny trunk, for
+/// the `from_trunk` mismatch guard below. `from_trunk`'s
+/// `check_compatible` check runs before any weight is ever read, so this
+/// checkpoint's own (unused) weights don't need to match `OTHER_HIDDEN`.
+fn mismatched_config_json() -> String {
+    const OTHER_HIDDEN: usize = 128;
+    const OTHER_HEADS: usize = 4;
+    const OTHER_KV: usize = 2;
+    format!(
+        r#"{{
+            "architectures": ["Lfm2BidirForSequenceClassification"],
+            "vocab_size": {VOCAB},
+            "hidden_size": {OTHER_HIDDEN},
+            "num_hidden_layers": 2,
+            "num_attention_heads": {OTHER_HEADS},
+            "num_key_value_heads": {OTHER_KV},
+            "layer_types": ["conv", "full_attention"],
+            "max_position_embeddings": 512,
+            "intermediate_size": {FFN},
+            "block_multiple_of": 1,
+            "conv_L_cache": {K},
+            "conv_bias": false,
+            "use_pos_enc": true,
+            "rope_theta": 1000000.0,
+            "id2label": {GOOD_ID2LABEL}
+        }}"#
+    )
+}
+
+/// The corruption this prevents: pairing a shared trunk with a specialist
+/// checkpoint trained for a DIFFERENT hidden size. `from_trunk` must catch
+/// this before ever touching a weight tensor, and must name the field that
+/// disagrees rather than surfacing a bare matmul shape error.
+#[test]
+fn from_trunk_over_a_differently_shaped_head_checkpoint_is_refused() {
+    let trunk_dir = write_checkpoint(&tiny_config_json(GOOD_ID2LABEL), full_weights(NUM_LABELS));
+    let trunk = Lfm2Trunk::load_shared(trunk_dir.path()).expect("load_shared");
+
+    let head_dir = write_checkpoint(&mismatched_config_json(), full_weights(NUM_LABELS));
+    let err = Lfm2SequenceClassifier::from_trunk(Arc::clone(&trunk), head_dir.path())
+        .expect_err("a head checkpoint with a different hidden_size must be refused");
+    let msg = err.to_string();
+    assert!(msg.contains("hidden_size"), "{msg}");
+}
+
+/// The parity contract, on a synthetic (hermetic, no real weights) fixture:
+/// `from_dir` and `from_trunk(load_shared(dir), dir)` over the SAME
+/// checkpoint directory must produce bit-identical logits. This is the same
+/// property `tests/sequence_classification_parity.rs` checks against a real
+/// checkpoint; kept here too because it needs no downloaded weights and so
+/// runs on every `cargo test`, not just when a specialist checkpoint is
+/// present on disk.
+#[test]
+fn from_trunk_over_a_matching_checkpoint_matches_from_dir_exactly() {
+    let dir = write_checkpoint(&tiny_config_json(GOOD_ID2LABEL), full_weights(NUM_LABELS));
+
+    let direct = Lfm2SequenceClassifier::from_dir(dir.path()).expect("from_dir");
+    let trunk = Lfm2Trunk::load_shared(dir.path()).expect("load_shared");
+    let shared = Lfm2SequenceClassifier::from_trunk(trunk, dir.path()).expect("from_trunk");
+
+    let want = direct.logits("hello world").expect("from_dir logits");
+    let got = shared.logits("hello world").expect("from_trunk logits");
+    assert_eq!(want, got, "from_dir and from_trunk must agree exactly on a synthetic checkpoint too");
 }

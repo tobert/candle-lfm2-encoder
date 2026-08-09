@@ -11,7 +11,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 
 use candle_core::{Device, Tensor};
-use candle_lfm2_encoder::{cosine_similarity, Lfm2Embedding, TextKind};
+use candle_lfm2_encoder::{cosine_similarity, Lfm2Embedding, Lfm2Trunk, TextKind};
 
 const MODEL: &str = "LFM2.5-Embedding-350M";
 
@@ -183,4 +183,26 @@ fn semantically_related_text_outranks_unrelated_text() {
         s_related > s_unrelated,
         "related {s_related} should outrank unrelated {s_unrelated}"
     );
+}
+
+/// `Lfm2Embedding::from_trunk`, over a trunk loaded once via
+/// `Lfm2Trunk::load_shared`, must reproduce `from_dir`'s vectors EXACTLY on
+/// the real Embedding-350M checkpoint. This head has no weights of its own
+/// beyond the trunk, so `from_trunk` here doesn't even open
+/// `model.safetensors` — a stricter version of the same parity contract the
+/// other heads are held to.
+#[test]
+fn from_trunk_matches_from_dir_exactly() {
+    let dir = checkpoint();
+    let direct = Lfm2Embedding::from_dir(&dir).expect("from_dir");
+    let trunk = Lfm2Trunk::load_shared(&dir).expect("load_shared");
+    let shared = Lfm2Embedding::from_trunk(trunk, &dir).expect("from_trunk");
+
+    for text in TEXTS {
+        for kind in [TextKind::Query, TextKind::Document] {
+            let want = direct.embed(text, kind).expect("from_dir embed");
+            let got = shared.embed(text, kind).expect("from_trunk embed");
+            assert_eq!(want, got, "{kind:?} embedding of {text:?} diverges");
+        }
+    }
 }

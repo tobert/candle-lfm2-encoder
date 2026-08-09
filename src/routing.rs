@@ -203,6 +203,7 @@
 
 use std::ops::Range;
 use std::path::Path;
+use std::sync::Arc;
 
 use candle_core::{DType, Device, Tensor};
 use candle_nn::{Linear, Module, VarBuilder};
@@ -440,7 +441,7 @@ pub struct RouteMatch {
 /// A loaded `Lfm2BidirForSequenceRouting` checkpoint (the Prompt-Router).
 #[derive(Debug)]
 pub struct Lfm2SequenceRouter {
-    trunk: Lfm2Trunk,
+    trunk: Arc<Lfm2Trunk>,
     tok_proj: Linear,
     rule_proj: Linear,
     /// `min(exp(logit_scale), 30.0)`, precomputed at load — deterministic
@@ -451,6 +452,57 @@ pub struct Lfm2SequenceRouter {
     tokenizer: Tokenizer,
 }
 
+/// Parse+validate `config.json` and load the tokenizer — the prefix shared
+/// by [`Lfm2SequenceRouter::from_dir_with`] (which goes on to load its own
+/// trunk) and [`Lfm2SequenceRouter::from_trunk`] (which reuses one instead).
+fn load_head_metadata(dir: &Path) -> Result<(Lfm2EncoderConfig, Tokenizer)> {
+    let cfg_path = dir.join("config.json");
+    let bytes = std::fs::read(&cfg_path).map_err(|e| Error::io(&cfg_path, e))?;
+    let cfg = Lfm2EncoderConfig::from_json(&bytes).map_err(|source| Error::ConfigParse {
+        path: cfg_path.clone(),
+        source,
+    })?;
+    cfg.validate().map_err(|message| Error::ConfigInvalid {
+        path: cfg_path.clone(),
+        message,
+    })?;
+
+    let tok_path = dir.join("tokenizer.json");
+    let tokenizer = Tokenizer::from_file(&tok_path).map_err(|e| Error::Tokenizer {
+        path: tok_path.clone(),
+        message: e.to_string(),
+    })?;
+
+    Ok((cfg, tokenizer))
+}
+
+/// Load `tok_proj`/`rule_proj`/`logit_scale`/`score_bias` from an already
+/// open `VarBuilder` — the router's own weights, shared by both loading
+/// paths regardless of whether `vb` was opened at the trunk's dtype/device
+/// (via [`Lfm2SequenceRouter::from_trunk`]) or a caller-chosen one (via
+/// [`Lfm2SequenceRouter::from_dir_with`]).
+fn load_projections(
+    cfg: &Lfm2EncoderConfig,
+    vb: &VarBuilder,
+) -> Result<(Linear, Linear, f32, f32)> {
+    let proj_dim = cfg.rule_proj_dim();
+    // Both projections carry a bias — unlike every projection inside the
+    // trunk, and like the token/sequence-classification heads' `classifier`.
+    let tok_proj = candle_nn::linear(cfg.hidden_size, proj_dim, vb.pp("tok_proj"))?;
+    let rule_proj = candle_nn::linear(cfg.hidden_size, proj_dim, vb.pp("rule_proj"))?;
+
+    // Two bare scalar parameters (shape `[]` in the checkpoint, not `[1]`)
+    // — `VarBuilder::get` accepts `()` as a 0-dim shape.
+    let logit_scale: f32 = vb.get((), "logit_scale")?.to_dtype(DType::F32)?.to_scalar()?;
+    let score_bias: f32 = vb.get((), "score_bias")?.to_dtype(DType::F32)?.to_scalar()?;
+    // Precompute the clamp Python applies at call time
+    // (`torch.clamp(self.logit_scale.exp(), max=30.0)`); it depends only on
+    // the loaded weight, so there's nothing to redo per call.
+    let scale = logit_scale.exp().min(30.0);
+
+    Ok((tok_proj, rule_proj, scale, score_bias))
+}
+
 impl Lfm2SequenceRouter {
     pub fn from_dir(dir: impl AsRef<Path>) -> Result<Self> {
         Self::from_dir_with(dir, DType::F32, &Device::Cpu)
@@ -458,23 +510,7 @@ impl Lfm2SequenceRouter {
 
     pub fn from_dir_with(dir: impl AsRef<Path>, dtype: DType, device: &Device) -> Result<Self> {
         let dir = dir.as_ref();
-
-        let cfg_path = dir.join("config.json");
-        let bytes = std::fs::read(&cfg_path).map_err(|e| Error::io(&cfg_path, e))?;
-        let cfg = Lfm2EncoderConfig::from_json(&bytes).map_err(|source| Error::ConfigParse {
-            path: cfg_path.clone(),
-            source,
-        })?;
-        cfg.validate().map_err(|message| Error::ConfigInvalid {
-            path: cfg_path.clone(),
-            message,
-        })?;
-
-        let tok_path = dir.join("tokenizer.json");
-        let tokenizer = Tokenizer::from_file(&tok_path).map_err(|e| Error::Tokenizer {
-            path: tok_path.clone(),
-            message: e.to_string(),
-        })?;
+        let (cfg, tokenizer) = load_head_metadata(dir)?;
 
         let weights = dir.join("model.safetensors");
         if !weights.is_file() {
@@ -484,26 +520,8 @@ impl Lfm2SequenceRouter {
             ));
         }
         let vb = unsafe { VarBuilder::from_mmaped_safetensors(&[weights], dtype, device)? };
-        let trunk = Lfm2Trunk::load(&cfg, vb.clone())?;
-
-        let proj_dim = cfg.rule_proj_dim();
-        // Both projections carry a bias — unlike every projection inside
-        // the trunk, and like the token/sequence-classification heads'
-        // `classifier`.
-        let tok_proj = candle_nn::linear(cfg.hidden_size, proj_dim, vb.pp("tok_proj"))?;
-        let rule_proj = candle_nn::linear(cfg.hidden_size, proj_dim, vb.pp("rule_proj"))?;
-
-        // Two bare scalar parameters (shape `[]` in the checkpoint, not
-        // `[1]`) — `VarBuilder::get` accepts `()` as a 0-dim shape.
-        let logit_scale: f32 = vb
-            .get((), "logit_scale")?
-            .to_dtype(DType::F32)?
-            .to_scalar()?;
-        let score_bias: f32 = vb.get((), "score_bias")?.to_dtype(DType::F32)?.to_scalar()?;
-        // Precompute the clamp Python applies at call time
-        // (`torch.clamp(self.logit_scale.exp(), max=30.0)`); it depends
-        // only on the loaded weight, so there's nothing to redo per call.
-        let scale = logit_scale.exp().min(30.0);
+        let trunk = Arc::new(Lfm2Trunk::load(&cfg, vb.clone())?);
+        let (tok_proj, rule_proj, scale, score_bias) = load_projections(&cfg, &vb)?;
 
         Ok(Self {
             trunk,
@@ -514,6 +532,48 @@ impl Lfm2SequenceRouter {
             tokenizer,
         })
     }
+
+    /// Build a router over an already-loaded, possibly-shared trunk — loads
+    /// ONLY the tokenizer and the `tok_proj`/`rule_proj`/`logit_scale`/
+    /// `score_bias` weights from `dir`, at the trunk's own dtype/device.
+    /// `dir`'s own trunk weights (under `lfm2.` in the same
+    /// `model.safetensors`) are never read; see
+    /// [`crate::sequence_classification::Lfm2SequenceClassifier::from_trunk`]
+    /// for the fuller rationale.
+    ///
+    /// Errors loudly, naming every mismatched field, if `dir`'s config
+    /// disagrees with the trunk's shape — see [`Lfm2Trunk::check_compatible`].
+    pub fn from_trunk(trunk: Arc<Lfm2Trunk>, dir: impl AsRef<Path>) -> Result<Self> {
+        let dir = dir.as_ref();
+        let (cfg, tokenizer) = load_head_metadata(dir)?;
+
+        let cfg_path = dir.join("config.json");
+        trunk
+            .check_compatible(&cfg)
+            .map_err(|message| Error::ConfigInvalid { path: cfg_path, message })?;
+
+        let weights = dir.join("model.safetensors");
+        if !weights.is_file() {
+            return Err(Error::io(
+                &weights,
+                std::io::Error::new(std::io::ErrorKind::NotFound, "no model.safetensors"),
+            ));
+        }
+        let vb = unsafe {
+            VarBuilder::from_mmaped_safetensors(&[weights], trunk.dtype(), trunk.device())?
+        };
+        let (tok_proj, rule_proj, scale, score_bias) = load_projections(&cfg, &vb)?;
+
+        Ok(Self {
+            trunk,
+            tok_proj,
+            rule_proj,
+            scale,
+            score_bias,
+            tokenizer,
+        })
+    }
+
 
     /// Dimension of the projection space `query`/`categories` live in
     /// (256 on every shipped checkpoint).

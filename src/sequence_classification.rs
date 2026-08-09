@@ -25,6 +25,7 @@
 //! something you want hard-wired to argmax at a fixed 0.5 boundary.
 
 use std::path::Path;
+use std::sync::Arc;
 
 use candle_core::{DType, Device, Module, Tensor};
 use candle_nn::{Linear, VarBuilder};
@@ -38,11 +39,45 @@ use crate::trunk::Lfm2Trunk;
 /// A loaded sequence-classification checkpoint.
 #[derive(Debug)]
 pub struct Lfm2SequenceClassifier {
-    trunk: Lfm2Trunk,
+    trunk: Arc<Lfm2Trunk>,
     classifier: Linear,
     tokenizer: Tokenizer,
     /// Label string per class id, ordered by id.
     id2label: Vec<String>,
+}
+
+/// Parse+validate `config.json`, pull out `id2label`, and load the
+/// tokenizer — the prefix shared by [`Lfm2SequenceClassifier::from_dir_with`]
+/// (which goes on to load its own trunk) and
+/// [`Lfm2SequenceClassifier::from_trunk`] (which reuses one instead).
+/// Factored out so the two loading paths cannot drift apart on what counts
+/// as a valid checkpoint.
+fn load_head_metadata(dir: &Path) -> Result<(Lfm2EncoderConfig, Vec<String>, Tokenizer)> {
+    let cfg_path = dir.join("config.json");
+    let bytes = std::fs::read(&cfg_path).map_err(|e| Error::io(&cfg_path, e))?;
+    let cfg = Lfm2EncoderConfig::from_json(&bytes).map_err(|source| Error::ConfigParse {
+        path: cfg_path.clone(),
+        source,
+    })?;
+    cfg.validate().map_err(|message| Error::ConfigInvalid {
+        path: cfg_path.clone(),
+        message,
+    })?;
+
+    let labels = cfg.id2label.as_ref().ok_or_else(|| Error::ConfigInvalid {
+        path: cfg_path.clone(),
+        message: "no id2label: this checkpoint carries no sequence-classification labels"
+            .to_string(),
+    })?;
+    let id2label = order_labels(labels, &cfg_path)?;
+
+    let tok_path = dir.join("tokenizer.json");
+    let tokenizer = Tokenizer::from_file(&tok_path).map_err(|e| Error::Tokenizer {
+        path: tok_path.clone(),
+        message: e.to_string(),
+    })?;
+
+    Ok((cfg, id2label, tokenizer))
 }
 
 impl Lfm2SequenceClassifier {
@@ -52,30 +87,7 @@ impl Lfm2SequenceClassifier {
 
     pub fn from_dir_with(dir: impl AsRef<Path>, dtype: DType, device: &Device) -> Result<Self> {
         let dir = dir.as_ref();
-
-        let cfg_path = dir.join("config.json");
-        let bytes = std::fs::read(&cfg_path).map_err(|e| Error::io(&cfg_path, e))?;
-        let cfg = Lfm2EncoderConfig::from_json(&bytes).map_err(|source| Error::ConfigParse {
-            path: cfg_path.clone(),
-            source,
-        })?;
-        cfg.validate().map_err(|message| Error::ConfigInvalid {
-            path: cfg_path.clone(),
-            message,
-        })?;
-
-        let labels = cfg.id2label.as_ref().ok_or_else(|| Error::ConfigInvalid {
-            path: cfg_path.clone(),
-            message: "no id2label: this checkpoint carries no sequence-classification labels"
-                .to_string(),
-        })?;
-        let id2label = order_labels(labels, &cfg_path)?;
-
-        let tok_path = dir.join("tokenizer.json");
-        let tokenizer = Tokenizer::from_file(&tok_path).map_err(|e| Error::Tokenizer {
-            path: tok_path.clone(),
-            message: e.to_string(),
-        })?;
+        let (cfg, id2label, tokenizer) = load_head_metadata(dir)?;
 
         let weights = dir.join("model.safetensors");
         if !weights.is_file() {
@@ -85,7 +97,7 @@ impl Lfm2SequenceClassifier {
             ));
         }
         let vb = unsafe { VarBuilder::from_mmaped_safetensors(&[weights], dtype, device)? };
-        let trunk = Lfm2Trunk::load(&cfg, vb.clone())?;
+        let trunk = Arc::new(Lfm2Trunk::load(&cfg, vb.clone())?);
 
         // A plain Linear over the CLS-pooled hidden state, WITH a bias
         // (unlike every projection inside the trunk) — same convention as
@@ -98,6 +110,55 @@ impl Lfm2SequenceClassifier {
             tokenizer,
             id2label,
         })
+    }
+
+    /// Build a head over an already-loaded, possibly-shared trunk — loads
+    /// ONLY the tokenizer and the classifier weights from `dir`, at the
+    /// trunk's own dtype/device (so a dtype/device mismatch is structurally
+    /// impossible, not merely checked). This is the frozen-trunk specialist
+    /// path: `dir`'s own trunk weights (under `lfm2.` in the same
+    /// `model.safetensors`) are never read — the already-loaded, shared
+    /// trunk is reused as-is, so N heads cost one trunk's memory instead of
+    /// N.
+    ///
+    /// Errors loudly, naming every mismatched field, if `dir`'s config
+    /// disagrees with the trunk's shape — see [`Lfm2Trunk::check_compatible`].
+    pub fn from_trunk(trunk: Arc<Lfm2Trunk>, dir: impl AsRef<Path>) -> Result<Self> {
+        let dir = dir.as_ref();
+        let (cfg, id2label, tokenizer) = load_head_metadata(dir)?;
+
+        let cfg_path = dir.join("config.json");
+        trunk
+            .check_compatible(&cfg)
+            .map_err(|message| Error::ConfigInvalid { path: cfg_path, message })?;
+
+        let weights = dir.join("model.safetensors");
+        if !weights.is_file() {
+            return Err(Error::io(
+                &weights,
+                std::io::Error::new(std::io::ErrorKind::NotFound, "no model.safetensors"),
+            ));
+        }
+        // Only `classifier.*` is pulled from this mmap; the trunk tensors
+        // it also carries under `lfm2.` are never touched.
+        let vb = unsafe {
+            VarBuilder::from_mmaped_safetensors(&[weights], trunk.dtype(), trunk.device())?
+        };
+        let classifier = candle_nn::linear(cfg.hidden_size, id2label.len(), vb.pp("classifier"))?;
+
+        Ok(Self {
+            trunk,
+            classifier,
+            tokenizer,
+            id2label,
+        })
+    }
+
+    /// The underlying trunk, for callers that want raw hidden states or
+    /// want to confirm two heads share the same loaded trunk (e.g.
+    /// `std::ptr::eq`).
+    pub fn trunk(&self) -> &Lfm2Trunk {
+        &self.trunk
     }
 
     /// Number of classes.

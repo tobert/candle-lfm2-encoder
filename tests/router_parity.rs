@@ -26,7 +26,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 
 use candle_core::{Device, Tensor};
-use candle_lfm2_encoder::Lfm2SequenceRouter;
+use candle_lfm2_encoder::{Lfm2SequenceRouter, Lfm2Trunk};
 use serde::Deserialize;
 use tokenizers::Tokenizer;
 
@@ -469,4 +469,25 @@ fn empty_routes_is_a_loud_error_against_the_real_model() {
     let empty: [&str; 0] = [];
     r.compute("hello", &empty)
         .expect_err("an empty routes slice must be refused, not silently scored as '(none)'");
+}
+
+/// `Lfm2SequenceRouter::from_trunk`, over a trunk loaded once via
+/// `Lfm2Trunk::load_shared`, must reproduce `from_dir`'s route scores
+/// EXACTLY on the real Prompt-Router checkpoint. Confirms the frozen-trunk
+/// sharing path drops in cleanly for the routing head too, which reads its
+/// own weights (`tok_proj`/`rule_proj`/`logit_scale`/`score_bias`) from the
+/// SAME `model.safetensors` the trunk lives in.
+#[test]
+fn from_trunk_matches_from_dir_exactly() {
+    let dir = checkpoint();
+    let direct = Lfm2SequenceRouter::from_dir(&dir).expect("from_dir");
+    let trunk = Lfm2Trunk::load_shared(&dir).expect("load_shared");
+    let shared = Lfm2SequenceRouter::from_trunk(trunk, &dir).expect("from_trunk");
+
+    let routes = ["Coding", "Sales", "Support"];
+    for text in ["how do I reverse a linked list in Rust?", "I'd like to cancel my subscription"] {
+        let want = direct.route_scores(text, &routes).expect("from_dir route_scores");
+        let got = shared.route_scores(text, &routes).expect("from_trunk route_scores");
+        assert_eq!(want, got, "route_scores diverge for {text:?}");
+    }
 }

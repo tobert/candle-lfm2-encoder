@@ -22,6 +22,7 @@
 //!    compare with a dot product.
 
 use std::path::Path;
+use std::sync::Arc;
 
 use candle_core::{DType, Device, Tensor};
 use candle_nn::VarBuilder;
@@ -61,7 +62,7 @@ pub const MAX_SEQ_LEN: usize = 512;
 /// A loaded embedding model: tokenizer + trunk.
 #[derive(Debug)]
 pub struct Lfm2Embedding {
-    trunk: Lfm2Trunk,
+    trunk: Arc<Lfm2Trunk>,
     tokenizer: Tokenizer,
     hidden_size: usize,
 }
@@ -115,7 +116,56 @@ impl Lfm2Embedding {
             ));
         }
         let vb = unsafe { VarBuilder::from_mmaped_safetensors(&[weights], dtype, device)? };
-        let trunk = Lfm2Trunk::load(&cfg, vb)?;
+        let trunk = Arc::new(Lfm2Trunk::load(&cfg, vb)?);
+
+        Ok(Self {
+            trunk,
+            tokenizer,
+            hidden_size: cfg.hidden_size,
+        })
+    }
+
+    /// Build over an already-loaded, possibly-shared trunk. This head has no
+    /// weights of its own beyond the trunk, so this loads ONLY `dir`'s
+    /// `tokenizer.json` — `dir`'s `model.safetensors` is never opened at
+    /// all. See
+    /// [`crate::sequence_classification::Lfm2SequenceClassifier::from_trunk`]
+    /// for the fuller rationale.
+    ///
+    /// Errors loudly, naming every mismatched field, if `dir`'s config
+    /// disagrees with the trunk's shape — see [`Lfm2Trunk::check_compatible`].
+    pub fn from_trunk(trunk: Arc<Lfm2Trunk>, dir: impl AsRef<Path>) -> Result<Self> {
+        let dir = dir.as_ref();
+
+        let cfg_path = dir.join("config.json");
+        let bytes = std::fs::read(&cfg_path).map_err(|e| Error::io(&cfg_path, e))?;
+        let cfg =
+            Lfm2EncoderConfig::from_json(&bytes).map_err(|source| Error::ConfigParse {
+                path: cfg_path.clone(),
+                source,
+            })?;
+        cfg.validate().map_err(|message| Error::ConfigInvalid {
+            path: cfg_path.clone(),
+            message,
+        })?;
+        trunk
+            .check_compatible(&cfg)
+            .map_err(|message| Error::ConfigInvalid { path: cfg_path.clone(), message })?;
+
+        let tok_path = dir.join("tokenizer.json");
+        let mut tokenizer = Tokenizer::from_file(&tok_path).map_err(|e| Error::Tokenizer {
+            path: tok_path.clone(),
+            message: e.to_string(),
+        })?;
+        tokenizer
+            .with_truncation(Some(tokenizers::TruncationParams {
+                max_length: MAX_SEQ_LEN,
+                ..Default::default()
+            }))
+            .map_err(|e| Error::Tokenizer {
+                path: tok_path.clone(),
+                message: e.to_string(),
+            })?;
 
         Ok(Self {
             trunk,

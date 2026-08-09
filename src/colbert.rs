@@ -29,6 +29,7 @@
 
 use std::collections::HashSet;
 use std::path::Path;
+use std::sync::Arc;
 
 use candle_core::{DType, Device, IndexOp, Module, Tensor};
 use candle_nn::{Linear, VarBuilder};
@@ -117,7 +118,7 @@ impl MultiVector {
 /// A loaded ColBERT model: trunk + the separate `1_Dense` projection.
 #[derive(Debug)]
 pub struct ColbertModel {
-    trunk: Lfm2Trunk,
+    trunk: Arc<Lfm2Trunk>,
     dense: Linear,
     tokenizer: Tokenizer,
     settings: ColbertSettings,
@@ -128,6 +129,100 @@ pub struct ColbertModel {
     dim: usize,
 }
 
+/// Parse+validate `config.json`, load `config_sentence_transformers.json`
+/// and the tokenizer, and derive the skiplist/expansion id from them — the
+/// prefix shared by [`ColbertModel::from_dir_with`] (which goes on to load
+/// its own trunk) and [`ColbertModel::from_trunk`] (which reuses one
+/// instead).
+fn load_head_metadata(
+    dir: &Path,
+) -> Result<(Lfm2EncoderConfig, ColbertSettings, Tokenizer, HashSet<u32>, u32)> {
+    let cfg_path = dir.join("config.json");
+    let bytes = std::fs::read(&cfg_path).map_err(|e| Error::io(&cfg_path, e))?;
+    let cfg = Lfm2EncoderConfig::from_json(&bytes).map_err(|source| Error::ConfigParse {
+        path: cfg_path.clone(),
+        source,
+    })?;
+    cfg.validate().map_err(|message| Error::ConfigInvalid {
+        path: cfg_path.clone(),
+        message,
+    })?;
+
+    let st_path = dir.join("config_sentence_transformers.json");
+    let st_bytes = std::fs::read(&st_path).map_err(|e| Error::io(&st_path, e))?;
+    let settings: ColbertSettings =
+        serde_json::from_slice(&st_bytes).map_err(|source| Error::ConfigParse {
+            path: st_path.clone(),
+            source,
+        })?;
+
+    let tok_path = dir.join("tokenizer.json");
+    let tokenizer = Tokenizer::from_file(&tok_path).map_err(|e| Error::Tokenizer {
+        path: tok_path.clone(),
+        message: e.to_string(),
+    })?;
+
+    // Punctuation ids to drop from documents. A word the tokenizer doesn't
+    // know as a single token simply has no id to skip.
+    let skiplist: HashSet<u32> = settings
+        .skiplist_words
+        .iter()
+        .filter_map(|w| tokenizer.token_to_id(w))
+        .collect();
+
+    // Query expansion pads with EOS, NOT with pad_token_id. The model card
+    // instructs `tokenizer.pad_token = tokenizer.eos_token`, and this
+    // checkpoint has no mask token at all.
+    let expansion_id = cfg.eos_token_id.ok_or_else(|| Error::ConfigInvalid {
+        path: cfg_path.clone(),
+        message: "ColBERT query expansion pads with the EOS token, but this config \
+                  carries no eos_token_id"
+            .to_string(),
+    })?;
+
+    Ok((cfg, settings, tokenizer, skiplist, expansion_id))
+}
+
+/// Load the `1_Dense` projection — ColBERT's own weights, shipped in a
+/// SEPARATE safetensors file from the trunk (see the module docs). Shared
+/// by both loading paths.
+fn load_dense(dir: &Path, dtype: DType, device: &Device) -> Result<(Linear, usize)> {
+    let dense_path = dir.join("1_Dense").join("model.safetensors");
+    if !dense_path.is_file() {
+        return Err(Error::io(
+            &dense_path,
+            std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                "ColBERT needs its 1_Dense projection; without it the trunk would \
+                 silently emit unprojected 1024-dim vectors",
+            ),
+        ));
+    }
+    let dense_cfg_path = dir.join("1_Dense").join("config.json");
+    let dense_cfg: DenseConfig = serde_json::from_slice(
+        &std::fs::read(&dense_cfg_path).map_err(|e| Error::io(&dense_cfg_path, e))?,
+    )
+    .map_err(|source| Error::ConfigParse {
+        path: dense_cfg_path.clone(),
+        source,
+    })?;
+    if dense_cfg.bias {
+        return Err(Error::ConfigInvalid {
+            path: dense_cfg_path,
+            message: "1_Dense declares a bias; only the bias-free projection is \
+                      implemented and verified"
+                .to_string(),
+        });
+    }
+    let dense_vb = unsafe { VarBuilder::from_mmaped_safetensors(&[dense_path], dtype, device)? };
+    let dense = candle_nn::linear_no_bias(
+        dense_cfg.in_features,
+        dense_cfg.out_features,
+        dense_vb.pp("linear"),
+    )?;
+    Ok((dense, dense_cfg.out_features))
+}
+
 impl ColbertModel {
     pub fn from_dir(dir: impl AsRef<Path>) -> Result<Self> {
         Self::from_dir_with(dir, DType::F32, &Device::Cpu)
@@ -135,49 +230,7 @@ impl ColbertModel {
 
     pub fn from_dir_with(dir: impl AsRef<Path>, dtype: DType, device: &Device) -> Result<Self> {
         let dir = dir.as_ref();
-
-        let cfg_path = dir.join("config.json");
-        let bytes = std::fs::read(&cfg_path).map_err(|e| Error::io(&cfg_path, e))?;
-        let cfg = Lfm2EncoderConfig::from_json(&bytes).map_err(|source| Error::ConfigParse {
-            path: cfg_path.clone(),
-            source,
-        })?;
-        cfg.validate().map_err(|message| Error::ConfigInvalid {
-            path: cfg_path.clone(),
-            message,
-        })?;
-
-        let st_path = dir.join("config_sentence_transformers.json");
-        let st_bytes = std::fs::read(&st_path).map_err(|e| Error::io(&st_path, e))?;
-        let settings: ColbertSettings =
-            serde_json::from_slice(&st_bytes).map_err(|source| Error::ConfigParse {
-                path: st_path.clone(),
-                source,
-            })?;
-
-        let tok_path = dir.join("tokenizer.json");
-        let tokenizer = Tokenizer::from_file(&tok_path).map_err(|e| Error::Tokenizer {
-            path: tok_path.clone(),
-            message: e.to_string(),
-        })?;
-
-        // Punctuation ids to drop from documents. A word the tokenizer
-        // doesn't know as a single token simply has no id to skip.
-        let skiplist: HashSet<u32> = settings
-            .skiplist_words
-            .iter()
-            .filter_map(|w| tokenizer.token_to_id(w))
-            .collect();
-
-        // Query expansion pads with EOS, NOT with pad_token_id. The model
-        // card instructs `tokenizer.pad_token = tokenizer.eos_token`, and
-        // this checkpoint has no mask token at all.
-        let expansion_id = cfg.eos_token_id.ok_or_else(|| Error::ConfigInvalid {
-            path: cfg_path.clone(),
-            message: "ColBERT query expansion pads with the EOS token, but this config \
-                      carries no eos_token_id"
-                .to_string(),
-        })?;
+        let (cfg, settings, tokenizer, skiplist, expansion_id) = load_head_metadata(dir)?;
 
         let weights = dir.join("model.safetensors");
         if !weights.is_file() {
@@ -187,44 +240,8 @@ impl ColbertModel {
             ));
         }
         let vb = unsafe { VarBuilder::from_mmaped_safetensors(&[weights], dtype, device)? };
-        let trunk = Lfm2Trunk::load(&cfg, vb)?;
-
-        // The projection ships in its OWN safetensors file, which is why a
-        // reader of model.safetensors alone concludes this is a bare trunk.
-        let dense_path = dir.join("1_Dense").join("model.safetensors");
-        if !dense_path.is_file() {
-            return Err(Error::io(
-                &dense_path,
-                std::io::Error::new(
-                    std::io::ErrorKind::NotFound,
-                    "ColBERT needs its 1_Dense projection; without it the trunk would \
-                     silently emit unprojected 1024-dim vectors",
-                ),
-            ));
-        }
-        let dense_cfg_path = dir.join("1_Dense").join("config.json");
-        let dense_cfg: DenseConfig = serde_json::from_slice(
-            &std::fs::read(&dense_cfg_path).map_err(|e| Error::io(&dense_cfg_path, e))?,
-        )
-        .map_err(|source| Error::ConfigParse {
-            path: dense_cfg_path.clone(),
-            source,
-        })?;
-        if dense_cfg.bias {
-            return Err(Error::ConfigInvalid {
-                path: dense_cfg_path,
-                message: "1_Dense declares a bias; only the bias-free projection is \
-                          implemented and verified"
-                    .to_string(),
-            });
-        }
-        let dense_vb =
-            unsafe { VarBuilder::from_mmaped_safetensors(&[dense_path], dtype, device)? };
-        let dense = candle_nn::linear_no_bias(
-            dense_cfg.in_features,
-            dense_cfg.out_features,
-            dense_vb.pp("linear"),
-        )?;
+        let trunk = Arc::new(Lfm2Trunk::load(&cfg, vb)?);
+        let (dense, dim) = load_dense(dir, dtype, device)?;
 
         Ok(Self {
             trunk,
@@ -233,8 +250,46 @@ impl ColbertModel {
             settings,
             skiplist,
             expansion_id,
-            dim: dense_cfg.out_features,
+            dim,
         })
+    }
+
+    /// Build over an already-loaded, possibly-shared trunk — loads ONLY the
+    /// tokenizer, settings, and the `1_Dense` projection from `dir`, at the
+    /// trunk's own dtype/device. `dir`'s main `model.safetensors` (which
+    /// carries the trunk weights this checkpoint would otherwise reload) is
+    /// never opened at all — the projection lives in its own file. See
+    /// [`crate::sequence_classification::Lfm2SequenceClassifier::from_trunk`]
+    /// for the fuller rationale.
+    ///
+    /// Errors loudly, naming every mismatched field, if `dir`'s config
+    /// disagrees with the trunk's shape — see [`Lfm2Trunk::check_compatible`].
+    pub fn from_trunk(trunk: Arc<Lfm2Trunk>, dir: impl AsRef<Path>) -> Result<Self> {
+        let dir = dir.as_ref();
+        let (cfg, settings, tokenizer, skiplist, expansion_id) = load_head_metadata(dir)?;
+
+        let cfg_path = dir.join("config.json");
+        trunk
+            .check_compatible(&cfg)
+            .map_err(|message| Error::ConfigInvalid { path: cfg_path, message })?;
+
+        let (dense, dim) = load_dense(dir, trunk.dtype(), trunk.device())?;
+
+        Ok(Self {
+            trunk,
+            dense,
+            tokenizer,
+            settings,
+            skiplist,
+            expansion_id,
+            dim,
+        })
+    }
+
+    /// The underlying trunk, for callers that want to confirm two heads
+    /// share the same loaded trunk (e.g. `std::ptr::eq`).
+    pub fn trunk(&self) -> &Lfm2Trunk {
+        &self.trunk
     }
 
     /// Per-token vector width (128).

@@ -13,7 +13,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 
 use candle_core::{Device, Tensor};
-use candle_lfm2_encoder::ColbertModel;
+use candle_lfm2_encoder::{ColbertModel, Lfm2Trunk};
 
 const MODEL: &str = "LFM2.5-ColBERT-350M";
 
@@ -182,4 +182,30 @@ fn maxsim_scores_match_and_rank_the_right_document_first() {
         .unwrap()
         .0;
     assert_eq!(best, 0, "expected document 0 to win, got scores {scores:?}");
+}
+
+/// `ColbertModel::from_trunk`, over a trunk loaded once via
+/// `Lfm2Trunk::load_shared`, must reproduce `from_dir`'s per-token vectors
+/// EXACTLY on the real ColBERT-350M checkpoint. This head's own weights
+/// (`1_Dense`) ship in a SEPARATE safetensors file from the trunk, so
+/// `from_trunk` here never opens the main `model.safetensors` at all —
+/// confirming the sharing path drops in cleanly even for the head with the
+/// most unusual on-disk layout.
+#[test]
+fn from_trunk_matches_from_dir_exactly() {
+    let dir = checkpoint();
+    let direct = ColbertModel::from_dir(&dir).expect("from_dir");
+    let trunk = Lfm2Trunk::load_shared(&dir).expect("load_shared");
+    let shared = ColbertModel::from_trunk(trunk, &dir).expect("from_trunk");
+
+    for q in QUERIES {
+        let want = direct.encode_query(q).expect("from_dir encode_query");
+        let got = shared.encode_query(q).expect("from_trunk encode_query");
+        assert_eq!(want.vectors, got.vectors, "query vectors diverge for {q:?}");
+    }
+    for d in DOCUMENTS {
+        let want = direct.encode_document(d).expect("from_dir encode_document");
+        let got = shared.encode_document(d).expect("from_trunk encode_document");
+        assert_eq!(want.vectors, got.vectors, "document vectors diverge for {d:?}");
+    }
 }

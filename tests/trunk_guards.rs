@@ -187,3 +187,134 @@ fn a_conv_bias_the_config_denies_is_refused() {
     let msg = err.to_string();
     assert!(msg.contains("conv_bias=false"), "{msg}");
 }
+
+/// A config JSON with the shape-defining fields as parameters — used by
+/// [`check_compatible`]'s guards below to build a second config that
+/// disagrees with [`tiny_config`] on exactly one field at a time.
+/// `check_compatible` never calls `validate()` itself, so this deliberately
+/// skips it too (a mismatched `layer_types` length is exactly one of the
+/// things being tested).
+fn other_config(hidden: usize, vocab: usize, layers: usize, heads: usize, kv_heads: usize, layer_types: &str) -> Lfm2EncoderConfig {
+    let json = format!(
+        r#"{{
+            "architectures": ["Lfm2BidirectionalModel"],
+            "vocab_size": {vocab},
+            "hidden_size": {hidden},
+            "num_hidden_layers": {layers},
+            "num_attention_heads": {heads},
+            "num_key_value_heads": {kv_heads},
+            "layer_types": {layer_types},
+            "max_position_embeddings": 512,
+            "intermediate_size": {FFN},
+            "block_multiple_of": 1,
+            "conv_L_cache": {K},
+            "conv_bias": false,
+            "use_pos_enc": true,
+            "rope_theta": 1000000.0
+        }}"#
+    );
+    Lfm2EncoderConfig::from_json(json.as_bytes()).expect("parse other config")
+}
+
+/// A checkpoint config identical in shape to `tiny_config()` must be
+/// declared compatible — this is the happy path `from_trunk` takes on every
+/// well-formed head checkpoint, and the guards below are only meaningful in
+/// contrast to it.
+#[test]
+fn check_compatible_accepts_a_config_with_the_same_shape() {
+    let cfg = tiny_config();
+    let trunk = Lfm2Trunk::load(&cfg, vb(tiny_weights("lfm2."))).expect("load trunk");
+
+    let same = other_config(HIDDEN, VOCAB, 2, HEADS, KV_HEADS, r#"["conv", "full_attention"]"#);
+    trunk.check_compatible(&same).expect("identical shape must be declared compatible");
+}
+
+/// The corruption this prevents: pairing a shared trunk with a head
+/// checkpoint trained for a DIFFERENT model shape. Without this check, the
+/// mismatch either panics three matmuls deep with a bare shape error, or —
+/// if dimensions happen to coincide in a way that still multiplies — runs
+/// to completion and hands back a plausible-looking, silently wrong number.
+/// Every disagreeing field must be named, not just the first found.
+#[test]
+fn check_compatible_names_every_mismatched_field() {
+    let cfg = tiny_config();
+    let trunk = Lfm2Trunk::load(&cfg, vb(tiny_weights("lfm2."))).expect("load trunk");
+
+    // Disagrees on hidden_size AND vocab_size, but keeps everything else
+    // matching tiny_config().
+    let mismatched = other_config(HIDDEN * 2, VOCAB + 1, 2, HEADS, KV_HEADS, r#"["conv", "full_attention"]"#);
+
+    let err = trunk
+        .check_compatible(&mismatched)
+        .expect_err("a differently-shaped head checkpoint must be refused");
+    assert!(err.contains("hidden_size"), "{err}");
+    assert!(err.contains(&HIDDEN.to_string()), "{err}");
+    assert!(err.contains(&(HIDDEN * 2).to_string()), "{err}");
+    assert!(err.contains("vocab_size"), "{err}");
+    // A field that DOES agree (num_hidden_layers) must not be named.
+    assert!(!err.contains("num_hidden_layers"), "{err}");
+}
+
+/// Layer count/kind disagreement is its own, separately-testable case: two
+/// configs can agree on every scalar field and still describe an
+/// incompatible model if the hybrid conv/attention layout differs.
+#[test]
+fn check_compatible_catches_a_layer_type_layout_disagreement() {
+    let cfg = tiny_config();
+    let trunk = Lfm2Trunk::load(&cfg, vb(tiny_weights("lfm2."))).expect("load trunk");
+
+    // Same layer COUNT, but attention/conv swapped.
+    let swapped = other_config(HIDDEN, VOCAB, 2, HEADS, KV_HEADS, r#"["full_attention", "conv"]"#);
+    let err = trunk
+        .check_compatible(&swapped)
+        .expect_err("a swapped conv/attention layout must be refused");
+    assert!(err.contains("layer_types"), "{err}");
+
+    // Different layer COUNT.
+    let deeper = other_config(HIDDEN, VOCAB, 3, HEADS, KV_HEADS, r#"["conv", "conv", "full_attention"]"#);
+    let err = trunk
+        .check_compatible(&deeper)
+        .expect_err("a different layer count must be refused");
+    assert!(err.contains("num_hidden_layers"), "{err}");
+}
+
+/// [`Lfm2Trunk::load_shared`] is the directory-based entry point
+/// `from_trunk` callers use; it must round-trip a real checkpoint directory
+/// (config.json + model.safetensors) the same way every head's `from_dir`
+/// does, and the trunk it hands back must be an `Arc` sized for sharing.
+#[test]
+fn load_shared_round_trips_a_directory_checkpoint() {
+    let _ = tiny_config(); // sanity: this is the shape config.json below encodes
+    let dir = tempfile::tempdir().expect("tempdir");
+    // `Lfm2EncoderConfig` has no `Serialize` derive, so write the same JSON
+    // literal `tiny_config()` itself parses, by hand.
+    std::fs::write(
+        dir.path().join("config.json"),
+        r#"{
+            "architectures": ["Lfm2BidirectionalModel"],
+            "vocab_size": 100,
+            "hidden_size": 64,
+            "num_hidden_layers": 2,
+            "num_attention_heads": 4,
+            "num_key_value_heads": 2,
+            "layer_types": ["conv", "full_attention"],
+            "max_position_embeddings": 512,
+            "intermediate_size": 128,
+            "block_multiple_of": 1,
+            "conv_L_cache": 3,
+            "conv_bias": false,
+            "use_pos_enc": true,
+            "rope_theta": 1000000.0
+        }"#,
+    )
+    .expect("write config.json");
+    candle_core::safetensors::save(&tiny_weights("lfm2."), dir.path().join("model.safetensors"))
+        .expect("write model.safetensors");
+
+    let trunk = Lfm2Trunk::load_shared(dir.path()).expect("load_shared");
+    assert_eq!(std::sync::Arc::strong_count(&trunk), 1);
+
+    let ids = Tensor::new(&[[1u32, 2, 3, 4]], &Device::Cpu).unwrap();
+    let out = trunk.forward(&ids, None).expect("forward");
+    assert_eq!(out.dims3().unwrap(), (1, 4, HIDDEN));
+}

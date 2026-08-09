@@ -19,6 +19,9 @@
 //! Q and K before RoPE, `operator_norm`/`ffn_norm` pre-norm residuals — is
 //! shared with the causal branch and adapted as-is.
 
+use std::path::Path;
+use std::sync::Arc;
+
 use candle_core::{DType, IndexOp, Module, Result, Tensor};
 use candle_nn::{Embedding, Linear, RmsNorm, VarBuilder};
 
@@ -493,6 +496,11 @@ pub struct Lfm2Trunk {
     inv_freq: Tensor,
     use_pos_enc: bool,
     dtype: DType,
+    /// The resolved config this trunk was built from — kept so
+    /// [`Self::check_compatible`] can verify a head checkpoint agrees with
+    /// it before [`Self::load_shared`] hands the trunk out to be reused
+    /// across several heads.
+    config: Lfm2EncoderConfig,
 }
 
 impl Lfm2Trunk {
@@ -559,7 +567,126 @@ impl Lfm2Trunk {
             inv_freq,
             use_pos_enc: cfg.use_pos_enc,
             dtype: vb.dtype(),
+            config: cfg.clone(),
         })
+    }
+
+    /// Load a trunk from a checkpoint directory as an `Arc`-wrapped shared
+    /// handle — the entry point for the frozen-trunk deployment: load ONE
+    /// trunk here, then build every specialist head over it with a head
+    /// type's `from_trunk`, so N heads cost one trunk's memory instead of N.
+    /// F32 on CPU, the crate's verified path; see [`Self::load_shared_with`]
+    /// for other dtypes/devices.
+    pub fn load_shared(dir: impl AsRef<Path>) -> crate::error::Result<Arc<Self>> {
+        Self::load_shared_with(dir, DType::F32, &candle_core::Device::Cpu)
+    }
+
+    /// As [`Self::load_shared`], choosing the compute dtype and device.
+    pub fn load_shared_with(
+        dir: impl AsRef<Path>,
+        dtype: DType,
+        device: &candle_core::Device,
+    ) -> crate::error::Result<Arc<Self>> {
+        let dir = dir.as_ref();
+
+        let cfg_path = dir.join("config.json");
+        let bytes = std::fs::read(&cfg_path).map_err(|e| crate::error::Error::io(&cfg_path, e))?;
+        let cfg = Lfm2EncoderConfig::from_json(&bytes).map_err(|source| {
+            crate::error::Error::ConfigParse { path: cfg_path.clone(), source }
+        })?;
+        cfg.validate().map_err(|message| crate::error::Error::ConfigInvalid {
+            path: cfg_path.clone(),
+            message,
+        })?;
+
+        let weights = dir.join("model.safetensors");
+        if !weights.is_file() {
+            return Err(crate::error::Error::io(
+                &weights,
+                std::io::Error::new(std::io::ErrorKind::NotFound, "no model.safetensors"),
+            ));
+        }
+        let vb = unsafe { VarBuilder::from_mmaped_safetensors(&[weights], dtype, device)? };
+        let trunk = Self::load(&cfg, vb)?;
+        Ok(Arc::new(trunk))
+    }
+
+    /// Verify a head checkpoint's config agrees with this trunk on every
+    /// field that defines its SHAPE — vocab, hidden size, layer count/kinds,
+    /// attention head counts, and effective RoPE theta. Head-only fields
+    /// (`id2label`, `rule_proj_dim`, …) are deliberately excluded: two
+    /// checkpoints legitimately disagree on those while still sharing one
+    /// trunk.
+    ///
+    /// This is what every head's `from_trunk` runs before reusing a shared
+    /// trunk. Without it, a head checkpoint that quietly disagrees on shape
+    /// would either panic three matmuls deep with a bare shape-mismatch
+    /// error, or — if the shapes happened to coincide numerically — run to
+    /// completion and hand back plausible-looking, silently wrong numbers.
+    /// Every mismatched field is named in the returned message, not just
+    /// the first one: a caller debugging "wrong checkpoint paired with this
+    /// trunk" wants the whole picture at once.
+    ///
+    /// This verifies **architectural compatibility, not weight identity**.
+    /// Two checkpoints with identical shapes but independently trained
+    /// trunks (every LiquidAI 350M specialist is a separate fine-tune) pass
+    /// every check here and still produce silently wrong numbers if
+    /// mispaired. Pairing a head with the trunk it was actually trained
+    /// over is the caller's responsibility; shared-trunk deployment is for
+    /// heads trained against a common frozen trunk.
+    pub fn check_compatible(&self, cfg: &Lfm2EncoderConfig) -> std::result::Result<(), String> {
+        let mine = &self.config;
+        let mut problems = Vec::new();
+
+        if mine.vocab_size != cfg.vocab_size {
+            problems.push(format!(
+                "vocab_size (trunk {} vs head checkpoint {})",
+                mine.vocab_size, cfg.vocab_size
+            ));
+        }
+        if mine.hidden_size != cfg.hidden_size {
+            problems.push(format!(
+                "hidden_size (trunk {} vs head checkpoint {})",
+                mine.hidden_size, cfg.hidden_size
+            ));
+        }
+        if mine.num_hidden_layers != cfg.num_hidden_layers {
+            problems.push(format!(
+                "num_hidden_layers (trunk {} vs head checkpoint {})",
+                mine.num_hidden_layers, cfg.num_hidden_layers
+            ));
+        }
+        if mine.num_attention_heads != cfg.num_attention_heads {
+            problems.push(format!(
+                "num_attention_heads (trunk {} vs head checkpoint {})",
+                mine.num_attention_heads, cfg.num_attention_heads
+            ));
+        }
+        if mine.num_key_value_heads != cfg.num_key_value_heads {
+            problems.push(format!(
+                "num_key_value_heads (trunk {} vs head checkpoint {})",
+                mine.num_key_value_heads, cfg.num_key_value_heads
+            ));
+        }
+        if mine.layer_types != cfg.layer_types {
+            problems.push("layer_types (conv/attention layout differs)".to_string());
+        }
+        if mine.rope_theta() != cfg.rope_theta() {
+            problems.push(format!(
+                "rope_theta (trunk {} vs head checkpoint {})",
+                mine.rope_theta(),
+                cfg.rope_theta()
+            ));
+        }
+
+        if problems.is_empty() {
+            Ok(())
+        } else {
+            Err(format!(
+                "head checkpoint config does not match the shared trunk: {}",
+                problems.join(", ")
+            ))
+        }
     }
 
     /// RoPE tables for `seq` positions, built per call.

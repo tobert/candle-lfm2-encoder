@@ -10,7 +10,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 
 use candle_core::{Device, Tensor};
-use candle_lfm2_encoder::Lfm2TokenClassifier;
+use candle_lfm2_encoder::{Lfm2Trunk, Lfm2TokenClassifier};
 use serde::Deserialize;
 
 const MODEL: &str = "LFM2.5-Encoder-350M-PII-Detector";
@@ -196,5 +196,26 @@ fn clean_text_produces_no_spans() {
             spans.iter().map(|s| (s.text(&case.text), &s.label)).collect::<Vec<_>>(),
             case.text
         );
+    }
+}
+
+/// `Lfm2TokenClassifier::from_trunk`, over a trunk loaded once via
+/// `Lfm2Trunk::load_shared`, must reproduce `from_dir`'s per-token argmax
+/// EXACTLY on the real PII-Detector checkpoint — same weights, same math.
+/// Confirms the frozen-trunk sharing path drops in cleanly for the
+/// token-classification head, not just the sequence-classification one it
+/// was designed against.
+#[test]
+fn from_trunk_matches_from_dir_exactly() {
+    let dir = checkpoint();
+    let direct = Lfm2TokenClassifier::from_dir(&dir).expect("from_dir");
+    let trunk = Lfm2Trunk::load_shared(&dir).expect("load_shared");
+    let shared = Lfm2TokenClassifier::from_trunk(trunk, &dir).expect("from_trunk");
+
+    let refs = reference();
+    for case in refs.cases.iter().take(5) {
+        let want = direct.token_label_ids(&case.text).expect("from_dir token_label_ids");
+        let got = shared.token_label_ids(&case.text).expect("from_trunk token_label_ids");
+        assert_eq!(want, got, "case {}: from_dir/from_trunk diverge", case.n);
     }
 }
