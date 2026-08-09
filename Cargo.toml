@@ -13,7 +13,13 @@ candle-nn = "0.11"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
-tokenizers = "0.23"
+# default features pull onig_sys (C) and esaxx-rs/cpp (C++). esaxx-rs is only
+# reachable from the Unigram *trainer* — we never train a vocab — and onig is
+# swappable for pure-Rust fancy-regex, which upstream itself uses for wasm.
+# Verified byte-identical token IDs across all six LFM2.5 tokenizers on 30
+# adversarial cases (2026-08-07). Keeps kaibo's build C++-free and lets the
+# crate compile for wasm32-unknown-unknown.
+tokenizers = { version = "0.23", default-features = false, features = ["fancy-regex"] }
 
 # Model download from the Hub is optional — consumers that ship weights
 # themselves (kaijutsu's model dir convention) never pull this in.
