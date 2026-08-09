@@ -40,6 +40,7 @@
 //!
 //! [candle]: https://github.com/huggingface/candle
 
+pub mod cascade;
 pub mod config;
 pub mod colbert;
 pub mod embedding;
@@ -50,6 +51,7 @@ pub mod sequence_classification;
 pub mod token_classification;
 pub mod trunk;
 
+pub use cascade::{aggregate, resolve_severe_labels, Cascade, CascadeVerdict, ClauseVerdict};
 pub use config::{EncoderArch, LayerType, Lfm2EncoderConfig};
 pub use colbert::{ColbertModel, MultiVector};
 pub use embedding::{cosine_similarity, Lfm2Embedding, TextKind};
