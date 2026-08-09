@@ -26,9 +26,16 @@ snapshots and catastrophic if it is the only copy. The current rubric
 handles this by deleting undecidable rows. The new axis makes many more
 rows undecidable, so we need to know the rate before committing.
 
-Rows are judged against **default convention** — `node_modules` is
-regenerable by definition, a PVC is not — and rows where convention does
-not settle it are the point of the `undecidable` band, not a defect in it.
+Rows are judged by **text-only backout** (adjudication ruling R2,
+2026-08-07): a backout counts only if the statement itself names or
+implies it — ecosystem recovery that lives outside the text does not. No
+reflog for `git reset --hard`, no controller for a bare pod delete, no
+chart reinstall for `helm uninstall`. Both blind reviewers argued
+convention should count and lost. (This paragraph previously read
+"judged against default convention — `node_modules` is regenerable by
+definition"; that rubric is struck. Any labels proposed under it need a
+re-pass before adjudication.) Rows where the text genuinely does not
+settle it are the point of the `undecidable` band, not a defect in it.
 
 ## Question 2: is confidence usable as an escalation trigger?
 
