@@ -113,11 +113,21 @@ kind: Service
 metadata:
   name: lfm2d
   namespace: lfm2d
+  annotations:
+    # Stable tailnet hostname (otherwise the operator derives one from
+    # namespace+service): lfm2d.<tailnet>.ts.net via MagicDNS.
+    tailscale.com/hostname: "lfm2d"
 spec:
   selector: { app: lfm2d }
   ports:
     - port: 8088
       targetPort: 8088
+  # Tailscale operator (installed by brak 2026-08-10): lfm2d gets its
+  # own tagged tailnet identity — no 0.0.0.0 listener, ACL-targetable.
+  # First deploy ran ClusterIP-only until health + weight_hash were
+  # verified in-cluster (they were: f740471a… exact match).
+  type: LoadBalancer
+  loadBalancerClass: tailscale
   # Deliberately ClusterIP (no `type:`) for first deploy: prove the pod
   # healthy and the weight_hash correct from inside the cluster, THEN
   # decide exposure. lfm2d has no auth of its own, and the zorak session
