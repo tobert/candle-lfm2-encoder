@@ -8,11 +8,13 @@ def load_raw(path):
 
 raw6, meta6 = load_raw('training/cascade/eval_v6_router_raw.json')
 raw7, meta7 = load_raw('training/cascade/eval_v7_router_raw.json')
+raw8, meta8 = load_raw('training/cascade/eval_v8_router_raw.json')
 
 label_map6 = meta6['provenance']['label_mapping_no_relabel_hypothesis']  # v6label -> goldname
 inv_map6 = {v: k for k, v in label_map6.items()}
 labels6 = meta6['classifier_labels']  # destructive, informative, mutating
 labels7 = meta7['classifier_labels']  # informative, situation-normal, data-critical
+labels8 = meta8['classifier_labels']  # informative, situation-normal, data-critical (v8 coverage batch)
 
 WINNER_BANDS = {'laundering', 'fanout', 'nav_noise', 'severity_tie'}  # a/b/c/e
 
@@ -126,36 +128,43 @@ def score(raw, to_gold, labels, tag):
 print("Recomputing v6 under this script's exact methodology (sanity check against findings_eval.md's committed numbers)")
 res6 = score(raw6, lambda n: label_map6[n], labels6, "v6 (recomputed)")
 res7 = score(raw7, lambda n: n, labels7, "v7")
+res8 = score(raw8, lambda n: n, labels8, "v8")
 
 print("\n=== a6 / c5 / e4 spotlight ===")
 for pid in ['a6', 'c5', 'e4']:
     p = probes[pid]
     r6 = raw6[pid]
     r7 = raw7[pid]
+    r8 = raw8[pid]
     clauses = [c['clause'] for c in p['gold_severity']]
     print(f"\n{pid} ({p['band']}): {p['statement']!r}")
     print(f"  gold_winning_clause: {p['gold_winning_clause']!r}")
     print(f"  v6 winner: [{r6['winner']}] {clauses[r6['winner']]!r}  scores={[round(c['severity_score'],4) for c in r6['clauses']]}")
     print(f"  v7 winner: [{r7['winner']}] {clauses[r7['winner']]!r}  scores={[round(c['severity_score'],4) for c in r7['clauses']]}")
+    print(f"  v8 winner: [{r8['winner']}] {clauses[r8['winner']]!r}  scores={[round(c['severity_score'],4) for c in r8['clauses']]}")
     for i, cl in enumerate(clauses):
         gold_name = p['gold_severity'][i]['severity']
         pn6, _ = predicted_label(r6, i, labels6, lambda n: label_map6[n])
         pn7, _ = predicted_label(r7, i, labels7, lambda n: n)
-        print(f"    clause[{i}] {cl!r}: gold={gold_name} v6_pred={pn6} v7_pred={pn7}")
+        pn8, probs8 = predicted_label(r8, i, labels8, lambda n: n)
+        print(f"    clause[{i}] {cl!r}: gold={gold_name} v6_pred={pn6} v7_pred={pn7} v8_pred={pn8} "
+              f"v8_probs={[round(x,4) for x in probs8]}")
 
 # lane accuracy sanity check (should not change; router untouched)
-lane_correct = 0
-lane_total = 0
-for pid, p in probes.items():
-    if p['band'] not in WINNER_BANDS:
-        continue
-    if p['gold_winning_clause'] is None:
-        continue
-    r = raw7.get(pid)
-    lane_total += 1
-    # lanes list order matches meta7['lanes']; need lane id names
-    lane_ids = ['k8s', 'shell', 'network', 'secrets', 'database', 'git', 'package', 'benign']
-    winner_lane_name = lane_ids[r['winner_lane']]
-    if winner_lane_name == p.get('expected_lane'):
-        lane_correct += 1
-print(f"\nlane accuracy (winner's lane vs authored expected_lane), v7 router pass: {lane_correct}/{lane_total} = {100*lane_correct/lane_total:.1f}%")
+lane_ids = ['k8s', 'shell', 'network', 'secrets', 'database', 'git', 'package', 'benign']
+for tag, raw in [('v7', raw7), ('v8', raw8)]:
+    lane_correct = 0
+    lane_total = 0
+    for pid, p in probes.items():
+        if p['band'] not in WINNER_BANDS:
+            continue
+        if p['gold_winning_clause'] is None:
+            continue
+        r = raw.get(pid)
+        lane_total += 1
+        # lanes list order matches meta7/meta8['lanes']; need lane id names
+        winner_lane_name = lane_ids[r['winner_lane']]
+        if winner_lane_name == p.get('expected_lane'):
+            lane_correct += 1
+    print(f"\nlane accuracy (winner's lane vs authored expected_lane), {tag} router pass: "
+          f"{lane_correct}/{lane_total} = {100*lane_correct/lane_total:.1f}%")
