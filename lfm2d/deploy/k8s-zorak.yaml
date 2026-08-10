@@ -12,12 +12,10 @@
 #   * models come from a hostPath under /tank — brak's local-path
 #     provisioner is node-local to BRAK, so a PVC does not compose with
 #     a zorak-pinned pod; hostPath is honest about node-pinned state;
-#   * OTLP points at zorak's HOST-level collector (systemd, *:4317) via
-#     the downward-API node IP — a WORKAROUND that only works while the
-#     pod is pinned here. The cluster has no in-cluster OTLP collector
-#     yet (brak's observability spine is VictoriaMetrics, metrics only);
-#     when brak's session stands up an in-cluster collector, switch to
-#     its Service DNS and delete the HOST_IP env.
+#   * OTLP points at the in-cluster collector brak's session stood up
+#     on deploy day (monitoring/otel-collector). The earlier HOST_IP
+#     downward-API workaround to zorak's host collector is RETIRED —
+#     traces have a cluster home now.
 #   * replicas: 1 — replica-scaling is the right lever generally (see
 #     k8s.yaml), but pinned to one node the replicas would fight over
 #     the same cores; revisit when a second gfx-labeled node exists.
@@ -67,10 +65,13 @@ spec:
           ports:
             - containerPort: 8088
           env:
-            - name: HOST_IP
-              valueFrom: { fieldRef: { fieldPath: status.hostIP } }
+            # In-cluster collector, stood up by brak's session 2026-08-10
+            # (monitoring/otel-collector, gRPC 4317 + HTTP 4318) — this
+            # RETIRES the HOST_IP downward-API workaround that previously
+            # lived here; brak had already made this exact change live
+            # before our Service update briefly reverted it.
             - name: OTEL_EXPORTER_OTLP_ENDPOINT
-              value: "http://$(HOST_IP):4317"
+              value: "http://otel-collector.monitoring.svc.cluster.local:4317"
             - name: OTEL_SERVICE_NAME
               value: lfm2d
           volumeMounts:
