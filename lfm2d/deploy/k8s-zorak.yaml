@@ -25,6 +25,8 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: lfm2d
+  namespace: lfm2d   # Amy's pick, 2026-08-10; needs hostPath allowed (no
+                     # restricted/baseline PSA) — brak's session creates it
   labels:
     app: lfm2d
 spec:
@@ -110,8 +112,19 @@ apiVersion: v1
 kind: Service
 metadata:
   name: lfm2d
+  namespace: lfm2d
 spec:
   selector: { app: lfm2d }
   ports:
     - port: 8088
       targetPort: 8088
+  # Tailnet exposure — Amy wants the service reachable on the tailnet.
+  # Preferred: the Tailscale k8s operator (cluster-wide install, brak's
+  # call), then switch this Service to:
+  #   type: LoadBalancer
+  #   loadBalancerClass: tailscale
+  # and lfm2d gets its own tailnet identity + MagicDNS name. Until then,
+  # a plain `type: LoadBalancer` uses k3s ServiceLB, which binds node
+  # interfaces (0.0.0.0 — includes zorak's tailnet IP but also the LAN),
+  # reachable at <zorak-tailnet-ip>:8088. lfm2d has no auth of its own;
+  # keep exposure inside the tailnet boundary.
