@@ -1,0 +1,117 @@
+# lfm2d — zorak-pinned overlay of k8s.yaml for the tobert.org homelab
+# k3s cluster (brak = control plane, zorak = tainted agent node).
+# Node facts verified live by the zorak Claude session, 2026-08-10:
+# labels role=execution, gpu.vendor=amd, gpu.arch=gfx1151; taint
+# homelab.tobert.org/execution=true:NoSchedule (deliberate — zorak
+# reboots; brak-destined pods must not drift onto it).
+#
+# Differences from the generic k8s.yaml, all deliberate:
+#   * pinned to zorak via nodeSelector + toleration — nothing schedules
+#     onto a tainted node without the toleration, and nothing else has
+#     the model files;
+#   * models come from a hostPath under /tank — brak's local-path
+#     provisioner is node-local to BRAK, so a PVC does not compose with
+#     a zorak-pinned pod; hostPath is honest about node-pinned state;
+#   * OTLP points at zorak's HOST-level collector (systemd, *:4317) via
+#     the downward-API node IP — a WORKAROUND that only works while the
+#     pod is pinned here. The cluster has no in-cluster OTLP collector
+#     yet (brak's observability spine is VictoriaMetrics, metrics only);
+#     when brak's session stands up an in-cluster collector, switch to
+#     its Service DNS and delete the HOST_IP env.
+#   * replicas: 1 — replica-scaling is the right lever generally (see
+#     k8s.yaml), but pinned to one node the replicas would fight over
+#     the same cores; revisit when a second gfx-labeled node exists.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: lfm2d
+  labels:
+    app: lfm2d
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app: lfm2d }
+  template:
+    metadata:
+      labels: { app: lfm2d }
+    spec:
+      nodeSelector:
+        gpu.arch: gfx1151
+      tolerations:
+        - key: "homelab.tobert.org/execution"
+          operator: "Equal"
+          value: "true"
+          effect: "NoSchedule"
+      terminationGracePeriodSeconds: 30
+      containers:
+        - name: lfm2d
+          # ghcr once the package exists; for a `k3s ctr images import`
+          # tarball instead, keep the localhost/ name the tarball was
+          # tagged with. IfNotPresent matters in BOTH cases: an imported
+          # image exists only on nodes it was imported to, and a pod that
+          # reschedules elsewhere would otherwise sit in ImagePullBackOff
+          # trying a registry that doesn't have it.
+          image: ghcr.io/tobert/lfm2d:latest
+          imagePullPolicy: IfNotPresent
+          args:
+            # kube_ordinal_v6 is the reviewed ship candidate; v8 is
+            # staged alongside on /tank — switching is this one line
+            # (pending the v8 acceptance decision).
+            - --classifier-dir=/models/kube_ordinal_v6
+            - --router-dir=/models/LFM2.5-Encoder-350M-Prompt-Router
+            - --cascade-route=shell
+            - --cascade-route=k8s
+            - --bind-addr=0.0.0.0:8088
+          ports:
+            - containerPort: 8088
+          env:
+            - name: HOST_IP
+              valueFrom: { fieldRef: { fieldPath: status.hostIP } }
+            - name: OTEL_EXPORTER_OTLP_ENDPOINT
+              value: "http://$(HOST_IP):4317"
+            - name: OTEL_SERVICE_NAME
+              value: lfm2d
+          volumeMounts:
+            - { name: models, mountPath: /models, readOnly: true }
+          readinessProbe:
+            httpGet: { path: /readyz, port: 8088 }
+            periodSeconds: 5
+            failureThreshold: 1
+          livenessProbe:
+            httpGet: { path: /healthz, port: 8088 }
+            periodSeconds: 10
+            failureThreshold: 3
+          # /tank is local NVMe-class storage — load is the ~400-660ms/
+          # head local-disk case, but the generous budget costs nothing.
+          startupProbe:
+            httpGet: { path: /readyz, port: 8088 }
+            periodSeconds: 10
+            failureThreshold: 30
+          resources:
+            requests:
+              # Measured numbers — see k8s.yaml's resources comment.
+              # Trivial on zorak (125 GiB), but the kubelet's free-memory
+              # arithmetic there is OPTIMISTIC: host-level llama.cpp
+              # servers outside k8s can claim 70+ GiB and
+              # system-reserved isn't set yet (zorak session's
+              # issues.md) — keep honest requests anyway.
+              memory: "4Gi"
+              cpu: "4"
+      volumes:
+        - name: models
+          hostPath:
+            # One subdirectory per checkpoint (config.json +
+            # model.safetensors + tokenizer.json), rsync-delivered; the
+            # zorak session owns this tree.
+            path: /tank/ml/models/lfm2d
+            type: Directory
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: lfm2d
+spec:
+  selector: { app: lfm2d }
+  ports:
+    - port: 8088
+      targetPort: 8088
