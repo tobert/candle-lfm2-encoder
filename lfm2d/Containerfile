@@ -1,0 +1,48 @@
+# lfm2d — LFM2.5 encoder sidecar. Two-stage build: a Rust builder produces
+# a static-ish release binary, the runtime stage ships ONLY that binary —
+# checkpoints are mounted at runtime (see deploy/lfm2d.container), never
+# baked into the image. Works under both `docker build` and `podman build`.
+#
+#   podman build -t lfm2d:latest -f lfm2d/Containerfile .
+#   docker build -t lfm2d:latest -f lfm2d/Containerfile .
+#
+# Build context must be the repo ROOT (not lfm2d/), since lfm2d depends on
+# the parent crate via `path = ".."`.
+
+FROM docker.io/library/rust:1-bookworm AS builder
+WORKDIR /build
+
+# Cache dependency compilation separately from source changes: copy only
+# the manifests first, build a throwaway main.rs, THEN copy real sources.
+# candle-core needs the real dependency tree from both crates' Cargo.tomls
+# to resolve, so both are copied up front.
+COPY Cargo.toml Cargo.lock ./
+COPY lfm2d/Cargo.toml lfm2d/Cargo.toml
+RUN mkdir -p src && echo "fn main() {}" > src/main.rs \
+    && mkdir -p lfm2d/src \
+    && echo "fn main() {}" > lfm2d/src/main.rs \
+    && echo "" > lfm2d/src/lib.rs \
+    && cargo build --release -p lfm2d 2>/dev/null || true \
+    && rm -rf src lfm2d/src
+
+COPY src ./src
+COPY lfm2d/src ./lfm2d/src
+RUN cargo build --release -p lfm2d
+
+FROM docker.io/library/debian:bookworm-slim AS runtime
+# No extra system packages: neither `candle-core` (default features — no
+# `accelerate`/`cuda`/`mkl` — so matmul is the pure-Rust `gemm` crate, no
+# BLAS to link) nor lfm2d's own deps (axum/tokio without TLS features, no
+# `hub` feature on the parent crate) need anything debian-slim doesn't
+# already ship. Revisit if a future dependency changes that.
+RUN useradd --system --no-create-home --shell /usr/sbin/nologin lfm2d
+COPY --from=builder /build/target/release/lfm2d /usr/local/bin/lfm2d
+
+# Checkpoints are mounted at runtime — see deploy/lfm2d.container's
+# `models` volume. This directory only needs to exist so a bind mount has
+# somewhere to land; nothing is baked into the image here.
+RUN mkdir -p /models && chown lfm2d:lfm2d /models
+
+USER lfm2d
+EXPOSE 8088
+ENTRYPOINT ["/usr/local/bin/lfm2d"]

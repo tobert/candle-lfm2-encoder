@@ -1,0 +1,98 @@
+# Example podman quadlet unit for lfm2d — the LFM2.5 encoder sidecar.
+#
+# Install as ~/.config/containers/systemd/lfm2d.container (rootless) or
+# /etc/containers/systemd/lfm2d.container (system), then:
+#   systemctl --user daemon-reload && systemctl --user start lfm2d
+#
+# Build the image first (from the repo root, NOT lfm2d/ — see Containerfile):
+#   podman build -t localhost/lfm2d:latest -f lfm2d/Containerfile .
+#
+# This example wires up a classifier + router for /v1/cascade. Adjust
+# --embedder-dir/--classifier-dir/--router-dir/--cascade-route to whatever
+# heads you're actually deploying; at least one head is required, and
+# /v1/cascade specifically needs both --classifier-dir and --router-dir
+# plus at least one --cascade-route (see lfm2d/README.md).
+
+[Unit]
+Description=lfm2d — LFM2.5 encoder sidecar
+After=network-online.target
+
+[Container]
+Image=localhost/lfm2d:latest
+ContainerName=lfm2d
+
+# Checkpoints are mounted, never baked into the image — point this at a
+# directory tree holding one subdirectory per checkpoint (the Hub layout
+# `hf download` produces). Read-only: the daemon never writes to it.
+Volume=%h/models/lfm2:/models:ro,Z
+
+# --- CPU niceness: this is the whole reason lfm2d is a separate process ---
+# A single forward pass already saturates ~13.6 of this box's cores
+# (measured) — CPUWeight lets the scheduler favor other cgroups under
+# contention without a hard cap that would slow down the (already-serial,
+# already-the-bottleneck) inference worker when the box IS idle otherwise.
+CPUWeight=50
+# Nice=10 is the "niced process" this was designed as — see CLAUDE.md.
+Nice=10
+
+# --- transport: pick one or both ---
+# Unix socket, for same-host callers (kaijutsu, kaibo) that want to skip
+# the TCP stack entirely. The socket directory must exist and be
+# writable by the container's runtime user — %t is the runtime dir.
+Volume=%t/lfm2d:/run/lfm2d:rw,Z
+Exec=/usr/local/bin/lfm2d \
+    --classifier-dir /models/kube_ordinal_v6 \
+    --router-dir /models/LFM2.5-Encoder-350M-Prompt-Router \
+    --cascade-route shell --cascade-route k8s \
+    --socket-path /run/lfm2d/lfm2d.sock \
+    --bind-addr 0.0.0.0:8088
+#
+# TCP-only alternative (drop the socket Volume/--socket-path above, keep
+# just the PublishPort + --bind-addr) for callers that aren't co-located:
+# PublishPort=127.0.0.1:8088:8088
+
+PublishPort=127.0.0.1:8088:8088
+
+# Env-var equivalents of every flag above also work (LFM2D_CLASSIFIER_DIR,
+# LFM2D_ROUTER_DIR, LFM2D_CASCADE_ROUTES, LFM2D_SOCKET_PATH,
+# LFM2D_BIND_ADDR, ...) — set via Environment= if you prefer config over
+# a long Exec= line:
+# Environment=LFM2D_CLASSIFIER_DIR=/models/kube_ordinal_v6
+# Environment=LFM2D_ROUTER_DIR=/models/LFM2.5-Encoder-350M-Prompt-Router
+# Environment=LFM2D_CASCADE_ROUTES=shell,k8s
+# Environment=LFM2D_BIND_ADDR=0.0.0.0:8088
+
+# OTLP export (metrics + traces + logs — see lfm2d/README.md's telemetry
+# section). Unset (the default) makes lfm2d log ONE loud "OTLP export
+# disabled" line and run stderr-only via journald — a missing/unreachable
+# collector never crashes it. Point this at a collector reachable from
+# inside the container if one exists:
+Environment=OTEL_EXPORTER_OTLP_ENDPOINT=http://127.0.0.1:4317
+Environment=OTEL_SERVICE_NAME=lfm2d
+
+HealthCmd=/usr/local/bin/lfm2d --help >/dev/null 2>&1 || exit 1
+# ^ a real HTTP healthcheck needs curl/wget in the runtime image, which
+# this Containerfile deliberately doesn't ship (keeps the image minimal —
+# see lfm2d/Containerfile's runtime-stage comment). Prefer a k8s-style
+# httpGet probe against /healthz from OUTSIDE the container instead; this
+# HealthCmd is a weak "the binary still execs" fallback for `podman ps`
+# users, not a substitute.
+
+[Service]
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target
+
+# --- k8s equivalent: see ../deploy/k8s.yaml for the real, complete
+# manifest (readinessProbe/livenessProbe/startupProbe, terminationGracePeriod
+# sized to the drain cap, a measured memory `resources.requests`, CPU
+# requests WITHOUT limits, OTLP env wiring). NOT reproduced here as a
+# trailing comment stub any more — a previous version of this file had one
+# pinned at `replicas: 1`, which read as "this must stay 1." It must not:
+# lfm2d is stateless (no shared state between requests, no coordination
+# between instances), so N replicas behind a Service — see k8s.yaml's
+# `replicas: 2` — is the horizontal scaling path; each replica just pays
+# its own model RSS (see k8s.yaml's `resources` comment for the measured
+# number).

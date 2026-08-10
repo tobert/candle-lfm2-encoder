@@ -1,3 +1,6 @@
+[workspace]
+members = ["lfm2d"]
+
 [package]
 name = "candle-lfm2-encoder"
 version = "0.0.1"

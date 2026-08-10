@@ -1,0 +1,143 @@
+# lfm2d — k8s Deployment + Service. lfm2d is STATELESS: N replicas behind
+# this Service is the horizontal scaling path (there was a stale
+# "replicas: 1" example in lfm2d.container's trailing comment implying
+# otherwise — wrong, fixed there too). Each replica just pays its own
+# model RSS; nothing here coordinates between replicas or needs to.
+#
+# Build the image first (from the repo ROOT, not lfm2d/ — see ../Containerfile):
+#   podman build -t lfm2d:latest -f lfm2d/Containerfile .
+# then push it somewhere this cluster can pull it from and update `image:`
+# below — this manifest assumes a pre-built image, it doesn't build one.
+#
+# Checkpoints are mounted, never baked into the image (see
+# ../Containerfile's runtime-stage comment) — this example uses a PVC
+# named `lfm2-models` holding one subdirectory per checkpoint (the layout
+# `hf download` produces); swap for whatever this cluster's model-hosting
+# convention is.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: lfm2d
+  labels:
+    app: lfm2d
+spec:
+  # Stateless: raise this for real horizontal scaling. A single serial
+  # inference worker thread per process (see lfm2d/README.md — a forward
+  # pass already saturates ~13.6 of this box's measured cores, so
+  # per-request concurrency inside one process has no headroom to spend)
+  # means throughput scales by ADDING REPLICAS, not by giving one replica
+  # more CPU.
+  replicas: 2
+  selector:
+    matchLabels: { app: lfm2d }
+  template:
+    metadata:
+      labels: { app: lfm2d }
+    spec:
+      # Comfortably above lfm2d's drain hard cap (~10s — see
+      # shutdown::DEFAULT_DRAIN_TIMEOUT in src/shutdown.rs): SIGTERM
+      # flips /readyz to 503 immediately, drains in-flight requests (a
+      # forward pass here is sub-second), then exits 0 well inside this
+      # window. The gap is slack for the Service's endpoint-removal
+      # propagation delay, not for slow requests.
+      terminationGracePeriodSeconds: 30
+      containers:
+        - name: lfm2d
+          image: localhost/lfm2d:latest
+          # No --threads flag: it sizes rayon's global pool BEFORE any
+          # model load (see src/config.rs's doc comment), and this
+          # manifest deliberately sets CPU `requests` WITHOUT `limits`
+          # (see the `resources:` comment below) — leaving it unset means
+          # `std::thread::available_parallelism()` reads the NODE's CPU
+          # count, the right default in that configuration. Set it
+          # explicitly (or via LFM2D_THREADS) if a `limits.cpu` is ever
+          # added here.
+          args:
+            - --classifier-dir=/models/kube_ordinal_v6
+            - --router-dir=/models/LFM2.5-Encoder-350M-Prompt-Router
+            - --cascade-route=shell
+            - --cascade-route=k8s
+            - --bind-addr=0.0.0.0:8088
+          ports:
+            - containerPort: 8088
+          env:
+            # Standard OTEL env config — unset (the default) makes
+            # telemetry::init log ONE loud "OTLP export disabled" line and
+            # run stderr-only; a missing/unreachable collector never
+            # crashes lfm2d or slows inference (batch exporters, drop on
+            # backpressure — see lfm2d/README.md's telemetry section).
+            # Point this at an in-cluster OTLP/gRPC collector when one
+            # exists.
+            - name: OTEL_EXPORTER_OTLP_ENDPOINT
+              value: "http://otel-collector.observability.svc:4317"
+            - name: OTEL_SERVICE_NAME
+              value: lfm2d
+          volumeMounts:
+            - { name: models, mountPath: /models, readOnly: true }
+          readinessProbe:
+            httpGet: { path: /readyz, port: 8088 }
+            periodSeconds: 5
+            failureThreshold: 1
+          livenessProbe:
+            httpGet: { path: /healthz, port: 8088 }
+            periodSeconds: 10
+            failureThreshold: 3
+          # Models load synchronously before the socket is ever bound (no
+          # lazy loading — a bad checkpoint fails startup loudly instead
+          # of the first request finding out). Local disk: ~400-660ms per
+          # head (measured). A cold PVC (first read pulling from network
+          # storage, or a CSI driver warming a cache) can take dramatically
+          # longer than that — this startupProbe's budget (30 x 10s = 300s)
+          # is sized for THAT case, not local-disk load time; the
+          # readiness/liveness probes above only start firing once this
+          # one succeeds.
+          startupProbe:
+            httpGet: { path: /readyz, port: 8088 }
+            periodSeconds: 10
+            failureThreshold: 30
+          resources:
+            requests:
+              # MEASURED, not estimated: `/proc/<pid>/status` VmRSS on this
+              # box with BOTH a classifier (kube_ordinal_v6) and a router
+              # (LFM2.5-Encoder-350M-Prompt-Router) loaded — the same
+              # config `args:` above requests — read 2,849,368 KiB
+              # (~2.78 GiB) steady-state RSS, i.e. ~1.4 GiB per loaded
+              # head-with-trunk (matches the parent crate's
+              # `candle-mmap-loads-are-copies` finding almost exactly).
+              # VmHWM (peak, captured during load) read 4,225,404 KiB
+              # (~4.03 GiB) — the load-time transient headroom below is
+              # sized off THAT peak, not the steady-state number, since a
+              # request during warmup (readyz is 503 until load finishes,
+              # so there shouldn't be one, but OOM-killing a pod mid-boot
+              # is a worse failure mode than requesting slightly more).
+              memory: "4Gi"
+              # CPU requests WITHOUT a limit — deliberate, not an
+              # oversight. rayon's global thread pool
+              # (`--threads`/`available_parallelism()` — see src/config.rs)
+              # auto-sizes to whatever the process can SEE; a cgroup CPU
+              # *limit* makes that visible core count shrink, and rayon
+              # does NOT re-check it mid-run, so a limit set after the
+              # process starts (or one Kubernetes enforces via CFS
+              # throttling instead of hiding cores) just means the same
+              # thread count fights over less CPU — pure throttling, no
+              # benefit, and a slower forward pass per request. This
+              # workload already scales by replica count (see `replicas:`
+              # above), not by starving one replica's CPU — weight-based
+              # sharing via `requests` (this pod gets CPU proportional to
+              # its request under contention, uncapped when the node is
+              # idle) is strictly better here than a hard limit.
+              cpu: "4"
+      volumes:
+        - name: models
+          persistentVolumeClaim:
+            claimName: lfm2-models
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: lfm2d
+spec:
+  selector: { app: lfm2d }
+  ports:
+    - port: 8088
+      targetPort: 8088

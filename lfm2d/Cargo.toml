@@ -1,0 +1,52 @@
+[package]
+name = "lfm2d"
+version = "0.0.1"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+description = "HTTP sidecar serving LFM2.5 encoder heads (embed/classify/route/cascade) over a Unix socket and/or TCP — one serial inference worker thread, weight-hashed audit trail"
+
+[dependencies]
+candle-lfm2-encoder = { path = ".." }
+
+axum = { version = "0.8", default-features = false, features = ["http1", "json", "tokio"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "signal", "io-util", "time"] }
+
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+clap = { version = "4", features = ["derive", "env"] }
+
+# Weight-hash audit trail: sha256 over each loaded checkpoint's
+# model.safetensors, hex-encoded. No separate `hex` dependency — the
+# encoding is four lines (see src/hash.rs).
+sha2 = "0.10"
+
+# --threads N calls rayon::ThreadPoolBuilder::build_global() before any
+# model load — candle's matmul (the `gemm` crate) already runs on rayon's
+# GLOBAL pool transitively, so sizing it here is how this flag actually
+# takes effect. Already in the dependency tree via tokenizers/gemm; pinned
+# directly since we call its builder API ourselves.
+rayon = "1"
+
+# --- tracing + OTLP export (metrics + traces + logs) ---
+# Amy's explicit preference over bare Prometheus: one pipe for all three
+# signals. rustls everywhere (never openssl); the capture server this was
+# verified against only accepts OTLP/gRPC, so `grpc-tonic` is the transport
+# (see lfm2d/README.md's telemetry section for the verification notes).
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+tracing-opentelemetry = "0.33"
+opentelemetry = "0.32"
+opentelemetry_sdk = { version = "0.32", features = ["rt-tokio"] }
+opentelemetry-otlp = { version = "0.32", default-features = false, features = [
+    "grpc-tonic",
+    "tls-webpki-roots",
+    "trace",
+    "metrics",
+    "logs",
+] }
+opentelemetry-appender-tracing = "0.32"
+
+[dev-dependencies]
+tower = { version = "0.5", features = ["util"] }
+tempfile = "3"

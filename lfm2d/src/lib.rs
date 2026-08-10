@@ -1,0 +1,74 @@
+//! `lfm2d` — the LFM2.5 encoder sidecar/daemon.
+//!
+//! # Why this exists
+//!
+//! candle's `from_mmaped_safetensors` copies every tensor into private
+//! anonymous RSS on load (see the crate's `candle-mmap-loads-are-copies`
+//! memory note) — there is no cross-process sharing, so N processes each
+//! loading a 350M checkpoint cost N × ~1.4 GiB, not one shared mapping. A
+//! single forward pass also saturates ~13.6 of this box's cores already
+//! (measured), so per-request concurrency buys nothing — serializing
+//! inference behind one worker loses no real throughput. And `kaibo`
+//! cannot link `candle-core` at all (it hard-wires `tokenizers`+`onig`,
+//! breaking kaibo's musl static-build invariant). One niced daemon process,
+//! loading each configured head exactly once, serving every consumer over
+//! HTTP, is the fix for all three.
+//!
+//! # Architecture
+//!
+//! One inference worker thread ([`worker::WorkerHandle`]) owns every loaded
+//! model. axum handlers never touch a model directly — they send a
+//! [`worker::WorkerCommand`] down an unbounded channel and `.await` a
+//! `oneshot` reply. Requests are processed strictly serially by design (see
+//! above); this is not a bottleneck to optimize away.
+//!
+//! The [`worker::InferenceEngine`] trait decouples the channel/handler
+//! plumbing from real candle models: [`engine_real::RealEngine`] is what
+//! `main.rs` spawns in production, but router tests build the same
+//! [`server::build_router`] over [`engine_stub::StubEngine`] instead — no
+//! weights loaded, no candle in the test binary's hot path, sub-millisecond
+//! tests for every HTTP-level concern (status codes, JSON shape, error
+//! mapping).
+//!
+//! # Two response conventions on purpose
+//!
+//! Every model load computes a weight hash (sha256 over its
+//! `model.safetensors`, hex) and every inference response is required to
+//! carry `{model_id, weight_hash}` — an audit requirement from the kaish
+//! approval-chain rulings. But `/embed` and `/predict` are specified as
+//! TEI-compatible-ish: a bare `[[f32,...]]` / `[[{label,score},...]]` array,
+//! matching what existing TEI clients already parse. Putting `model_id`/
+//! `weight_hash` IN that body would break TEI wire compatibility for no
+//! reason; leaving them out entirely would violate the audit requirement.
+//! This crate's resolution: `/embed` and `/predict` carry `X-Model-Id` and
+//! `X-Model-Weight-Hash` response headers (inspectable, satisfies "every
+//! response carries," never touches the JSON body), while `/v1/classify`,
+//! `/v1/route`, and `/v1/cascade` — "our full contract," not TEI-compat —
+//! carry the same pair directly in the JSON body, per the API spec's own
+//! text. See `server::attach_audit_headers` and each handler's doc comment.
+//!
+//! # Cascade configuration is server-side, not per-request
+//!
+//! `POST /v1/cascade` takes only `{"clauses": [...]}`. The library's
+//! [`candle_lfm2_encoder::Cascade::run`] additionally needs `routes` (the
+//! candidate lanes) and `severe_labels` (which of the classifier's own
+//! labels count toward the ranking sum) — this daemon takes both as
+//! **startup** configuration (`--cascade-route` repeatable, matching
+//! `examples/cascade.rs --routes-file`'s route-string convention;
+//! `--cascade-severe-label`, defaulting to `mutating,destructive` — the
+//! same default `examples/cascade.rs` uses for `kube_ordinal_v6`), not as
+//! request fields. A cascade specialist's lane set and severity definition
+//! are properties of how the service is deployed, not something each
+//! caller should be re-specifying (and re-trusting) per call. This is a
+//! judgment call the task spec left implicit; see `lfm2d/README.md`.
+
+pub mod config;
+pub mod engine_real;
+pub mod engine_stub;
+pub mod hash;
+pub mod probe;
+pub mod server;
+pub mod shutdown;
+pub mod telemetry;
+pub mod types;
+pub mod worker;
