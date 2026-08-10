@@ -376,7 +376,15 @@ def export_checkpoint(
     tensors = OrderedDict(
         (k, v.detach().to("cpu").contiguous()) for k, v in state_dict.items()
     )
-    save_file(tensors, str(out_dir / "model.safetensors"))
+    weights_path = out_dir / "model.safetensors"
+    save_file(tensors, str(weights_path))
+    # safetensors writes through mkstemp, which creates mode 600 regardless
+    # of umask — unlike every other file this export writes. Normalize so
+    # downstream consumers that read as a different user (lfm2d's non-root
+    # container over a hostPath staging copy) can read the weights; the
+    # training tree's privacy is enforced by its 0700 top-level dir, not
+    # by per-file modes. Found the hard way staging v6/v8 to k3s.
+    weights_path.chmod(0o644)
 
     base_config_path = base_dir / "config.json"
     with open(base_config_path, "r", encoding="utf-8") as f:
