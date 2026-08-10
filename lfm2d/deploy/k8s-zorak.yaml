@@ -118,13 +118,20 @@ spec:
   ports:
     - port: 8088
       targetPort: 8088
-  # Tailnet exposure — Amy wants the service reachable on the tailnet.
-  # Preferred: the Tailscale k8s operator (cluster-wide install, brak's
-  # call), then switch this Service to:
+  # Deliberately ClusterIP (no `type:`) for first deploy: prove the pod
+  # healthy and the weight_hash correct from inside the cluster, THEN
+  # decide exposure. lfm2d has no auth of its own, and the zorak session
+  # audit (2026-08-10) found two things that make exposure a conscious
+  # decision, not a default:
+  #   1. k3s ServiceLB/NodePort binds 0.0.0.0 — putting `tailscale
+  #      serve` in front adds a TLS tailnet path but does NOT close the
+  #      LAN listener next to it; "tailnet boundary" via ServiceLB is
+  #      decoration unless the port is also firewalled off the LAN NIC.
+  #   2. The tailnet has a SECOND user account on it — tailnet-only is
+  #      not owner-only for an unauthenticated API.
+  # The clean answer stays the Tailscale k8s operator (brak's call):
   #   type: LoadBalancer
   #   loadBalancerClass: tailscale
-  # and lfm2d gets its own tailnet identity + MagicDNS name. Until then,
-  # a plain `type: LoadBalancer` uses k3s ServiceLB, which binds node
-  # interfaces (0.0.0.0 — includes zorak's tailnet IP but also the LAN),
-  # reachable at <zorak-tailnet-ip>:8088. lfm2d has no auth of its own;
-  # keep exposure inside the tailnet boundary.
+  # gives lfm2d its own tagged tailnet identity with no 0.0.0.0
+  # listener, and tags make it ACL-targetable so access can be
+  # restricted per-user. Funnel (public internet) is ruled out.
