@@ -53,10 +53,17 @@ spec:
           # explicitly (or via LFM2D_THREADS) if a `limits.cpu` is ever
           # added here.
           args:
-            - --classifier-dir=/models/kube_ordinal_v6
+            # A checkpoint and its severe set travel together: v8 speaks
+            # informative/situation-normal/data-critical, v6 spoke
+            # informative/mutating/destructive, and the daemon's built-in
+            # default severe set is v6's. Changing --classifier-dir alone
+            # makes /v1/cascade refuse every request.
+            - --classifier-dir=/models/kube_ordinal_v8
             - --router-dir=/models/LFM2.5-Encoder-350M-Prompt-Router
             - --cascade-route=shell
             - --cascade-route=k8s
+            - --cascade-severe-label=situation-normal
+            - --cascade-severe-label=data-critical
             - --bind-addr=0.0.0.0:8088
           ports:
             - containerPort: 8088

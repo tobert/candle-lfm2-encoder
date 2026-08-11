@@ -54,13 +54,25 @@ spec:
           image: ghcr.io/tobert/lfm2d:latest
           imagePullPolicy: IfNotPresent
           args:
-            # kube_ordinal_v6 is the reviewed ship candidate; v8 is
-            # staged alongside on /tank — switching is this one line
-            # (pending the v8 acceptance decision).
-            - --classifier-dir=/models/kube_ordinal_v6
+            # kube_ordinal_v8 — accepted by Amy 2026-08-11. v6 remains
+            # staged alongside on /tank as the rollback target.
+            #
+            # Switching checkpoints is NOT one line: v8 speaks a different
+            # label vocabulary (informative/situation-normal/data-critical)
+            # than v6 (informative/mutating/destructive), so the severe set
+            # must move with it. The severe pair below is what the v8
+            # evaluation actually resolved — see the
+            # `severe_labels_resolved` field in
+            # training/cascade/eval_v8_router_raw.json, not a guess from
+            # the label names. Mismatched labels do not degrade silently:
+            # `cascade::resolve_severe_labels` refuses an unknown label and
+            # names it, so /v1/cascade would error on every call.
+            - --classifier-dir=/models/kube_ordinal_v8
             - --router-dir=/models/LFM2.5-Encoder-350M-Prompt-Router
             - --cascade-route=shell
             - --cascade-route=k8s
+            - --cascade-severe-label=situation-normal
+            - --cascade-severe-label=data-critical
             - --bind-addr=0.0.0.0:8088
           ports:
             - containerPort: 8088
