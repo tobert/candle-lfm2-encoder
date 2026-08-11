@@ -12,7 +12,7 @@
 use std::io::BufRead;
 use std::time::Instant;
 
-use candle_lfm2_encoder::Lfm2SequenceClassifier;
+use lfm2_encoder::Lfm2SequenceClassifier;
 
 const DEMO: [&str; 8] = [
     "kubectl get pods -n payments -o wide",
@@ -25,7 +25,7 @@ const DEMO: [&str; 8] = [
     "clean out everything in the loadtest namespace after standup",
 ];
 
-fn main() -> candle_lfm2_encoder::Result<()> {
+fn main() -> lfm2_encoder::Result<()> {
     let mut args = std::env::args().skip(1);
     let dir = args.next().unwrap_or_else(|| {
         eprintln!("usage: classify <checkpoint-dir> [text ...]");

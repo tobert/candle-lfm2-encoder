@@ -32,7 +32,7 @@
 
 use std::path::PathBuf;
 
-use candle_lfm2_encoder::Lfm2SequenceRouter;
+use lfm2_encoder::Lfm2SequenceRouter;
 
 const MODEL: &str = "LFM2.5-Encoder-350M-Prompt-Router";
 

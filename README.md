@@ -1,7 +1,11 @@
-# candle-lfm2-encoder
+# lfm2d
 
 LiquidAI's **LFM2.5 bidirectional encoders** on [candle] — pure Rust,
 CPU-first, no Python, no C++.
+
+Two crates in one workspace: **`lfm2-encoder`** (this README — the library,
+at the repo root) and **`lfm2d`** (the HTTP daemon that serves its heads over
+a Unix socket and/or TCP — see [`lfm2d/README.md`](lfm2d/README.md)).
 
 Upstream candle-transformers implements the *causal* LFM2
 (`models/lfm2.rs`). Nobody implements the encoder branch —

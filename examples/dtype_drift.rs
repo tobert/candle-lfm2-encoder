@@ -10,7 +10,7 @@
 //! ```
 
 use candle_core::{DType, Device};
-use candle_lfm2_encoder::{cosine_similarity, Lfm2Embedding, TextKind};
+use lfm2_encoder::{cosine_similarity, Lfm2Embedding, TextKind};
 
 const TEXTS: [&str; 8] = [
     "how does the borrow checker prevent use-after-free in Rust?",
@@ -23,7 +23,7 @@ const TEXTS: [&str; 8] = [
     "vector search 🔍 with a 350M encoder",
 ];
 
-fn main() -> candle_lfm2_encoder::Result<()> {
+fn main() -> lfm2_encoder::Result<()> {
     let dir = std::env::args().nth(1).unwrap_or_else(|| {
         eprintln!("usage: dtype_drift <checkpoint-dir>");
         std::process::exit(2);

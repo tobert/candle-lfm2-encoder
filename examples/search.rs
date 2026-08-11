@@ -20,7 +20,7 @@
 use std::time::Instant;
 
 use candle_core::{DType, Device};
-use candle_lfm2_encoder::{cosine_similarity, Lfm2Embedding, TextKind};
+use lfm2_encoder::{cosine_similarity, Lfm2Embedding, TextKind};
 use serde::Deserialize;
 
 #[derive(Deserialize)]
@@ -52,7 +52,7 @@ struct Index {
 }
 
 impl Index {
-    fn build(model: &Lfm2Embedding, items: &[(String, String)]) -> candle_lfm2_encoder::Result<Self> {
+    fn build(model: &Lfm2Embedding, items: &[(String, String)]) -> lfm2_encoder::Result<Self> {
         let mut ids = Vec::with_capacity(items.len());
         let mut texts = Vec::with_capacity(items.len());
         let mut vectors = Vec::with_capacity(items.len());
@@ -72,7 +72,7 @@ impl Index {
         model: &Lfm2Embedding,
         query: &str,
         k: usize,
-    ) -> candle_lfm2_encoder::Result<Vec<(f32, usize)>> {
+    ) -> lfm2_encoder::Result<Vec<(f32, usize)>> {
         let q = model.embed_normalized(query, TextKind::Query)?;
         let mut scored: Vec<(f32, usize)> = self
             .vectors
@@ -119,7 +119,7 @@ fn load_dir(root: &str) -> Vec<(String, String)> {
     out
 }
 
-fn main() -> candle_lfm2_encoder::Result<()> {
+fn main() -> lfm2_encoder::Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let dir = args.first().cloned().unwrap_or_else(|| {
         eprintln!("usage: search <checkpoint-dir> [--eval] [--query TEXT] [--dir DIR] [--dtype f16]");
@@ -176,7 +176,7 @@ fn main() -> candle_lfm2_encoder::Result<()> {
 
 /// Recall@k plus the measure that actually separates a good retriever from
 /// a lucky one: does the hard negative outrank the true positive?
-fn eval(model: &Lfm2Embedding, index: &Index) -> candle_lfm2_encoder::Result<()> {
+fn eval(model: &Lfm2Embedding, index: &Index) -> lfm2_encoder::Result<()> {
     let corpus = load_corpus();
     let position = |id: &str| index.ids.iter().position(|s| s.starts_with(&format!("{id} ")));
 

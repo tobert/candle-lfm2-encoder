@@ -12,7 +12,7 @@ use std::collections::HashMap;
 
 use candle_core::{DType, Device, Tensor};
 use candle_nn::VarBuilder;
-use candle_lfm2_encoder::{Lfm2EncoderConfig, Lfm2Trunk};
+use lfm2_encoder::{Lfm2EncoderConfig, Lfm2Trunk};
 
 const HIDDEN: usize = 64;
 const HEADS: usize = 4;

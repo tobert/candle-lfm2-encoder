@@ -2,7 +2,7 @@
 members = ["lfm2d"]
 
 [package]
-name = "candle-lfm2-encoder"
+name = "lfm2-encoder"
 version = "0.0.1"
 edition = "2024"
 license = "MIT OR Apache-2.0"

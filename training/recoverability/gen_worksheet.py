@@ -1,7 +1,18 @@
 import json
+import sys
+from pathlib import Path
 
-S = "/tmp/claude-1000/-home-atobey-src-candle-lfm2-encoder/0dffdd2b-cf60-42ad-b08d-bab60851664b/scratchpad"
-cases = json.load(open(f"{S}/cases_scored.json"))
+# Input came from a session scratchpad under /tmp, which was purged 2026-08-11;
+# the surviving copy is zorak's archive. Pass a path to override. Fails loudly
+# rather than silently producing an empty worksheet.
+DEFAULT_CASES = Path.home() / (
+    "archive/zorak/candle-scratchpads-2026-08-11/"
+    "0dffdd2b-cf60-42ad-b08d-bab60851664b/scratchpad/cases_scored.json"
+)
+CASES_PATH = Path(sys.argv[1]) if len(sys.argv) > 1 else DEFAULT_CASES
+if not CASES_PATH.is_file():
+    sys.exit(f"MISSING: {CASES_PATH} — pass the path to cases_scored.json as argv[1]")
+cases = json.loads(CASES_PATH.read_text())
 for i, c in enumerate(cases, 1):
     c["_n"] = i
 

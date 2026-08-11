@@ -11,7 +11,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 
 use candle_core::{Device, Tensor};
-use candle_lfm2_encoder::{cosine_similarity, Lfm2Embedding, Lfm2Trunk, TextKind};
+use lfm2_encoder::{cosine_similarity, Lfm2Embedding, Lfm2Trunk, TextKind};
 
 const MODEL: &str = "LFM2.5-Embedding-350M";
 

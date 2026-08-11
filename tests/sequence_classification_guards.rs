@@ -15,7 +15,7 @@ use std::sync::Arc;
 
 use ahash::AHashMap;
 use candle_core::{DType, Device, Tensor};
-use candle_lfm2_encoder::{Lfm2SequenceClassifier, Lfm2Trunk};
+use lfm2_encoder::{Lfm2SequenceClassifier, Lfm2Trunk};
 use tokenizers::models::wordlevel::WordLevel;
 use tokenizers::pre_tokenizers::whitespace::Whitespace;
 use tokenizers::Tokenizer;

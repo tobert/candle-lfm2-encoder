@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Fine-tune `LiquidAI/LFM2.5-Encoder-350M` (a bidirectional masked-LM
 encoder) into a whole-sequence classifier, and export it in the exact
-layout the candle-lfm2-encoder Rust crate expects to load directly.
+layout the lfm2-encoder Rust crate expects to load directly.
 
 Export contract (fixed — do not change without updating the Rust loader):
 

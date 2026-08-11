@@ -247,7 +247,7 @@ async fn classify(
 /// `POST /v1/route` — `{"input": str, "routes": [str,...]}` → per route
 /// `{"route", "cosine"}`. RAW COSINE ONLY: this router's softmax is
 /// route-count arithmetic and carries no confidence information (see
-/// `candle_lfm2_encoder::routing`'s module docs, "the softmax is
+/// `lfm2_encoder::routing`'s module docs, "the softmax is
 /// saturated") — never exposed here.
 async fn route(
     State(state): State<Arc<AppState>>,
@@ -266,7 +266,7 @@ async fn route(
 /// decomposition is the caller's job via kaish `Plan`) →
 /// moderations-FLAVORED but with NO `flagged` boolean and NO threshold
 /// anywhere: `{winner, lane, clauses, models}`. This handler does NOT
-/// reimplement `candle_lfm2_encoder::cascade`'s rank-by-severity-route-the-
+/// reimplement `lfm2_encoder::cascade`'s rank-by-severity-route-the-
 /// winner aggregation — it calls straight through
 /// [`WorkerHandle::cascade`] → the library's `Cascade::run`. `routes` and
 /// `severe_labels` are NOT request fields; they are fixed server-side
@@ -319,7 +319,7 @@ async fn spans(
 }
 
 /// `POST /v1/spans/credentials` — as [`spans`], filtered server-side (via
-/// `candle_lfm2_encoder::Lfm2TokenClassifier::credentials`) to ONLY the
+/// `lfm2_encoder::Lfm2TokenClassifier::credentials`) to ONLY the
 /// `credential.*` entity family. A separate endpoint rather than a
 /// `/v1/spans?credentials_only=true`-style flag — AWS's precedent of
 /// shipping "contains PII" as its own API, not a parameter on the general

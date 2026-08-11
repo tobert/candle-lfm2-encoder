@@ -48,7 +48,7 @@ DATASET_FILES = {
 
 MODEL_SRC = DATA / "runs/kube_ordinal_v3"
 MODEL_FILES = ["config.json", "model.safetensors", "tokenizer.json"]
-BASE_CHECKPOINT = Path.home() / "src/candle-lfm2-encoder/.models/LFM2.5-Encoder-350M"
+BASE_CHECKPOINT = HERE.parents[1] / ".models/LFM2.5-Encoder-350M"
 
 
 def copy(src: Path, dst: Path) -> int:

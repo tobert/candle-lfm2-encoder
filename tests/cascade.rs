@@ -41,7 +41,7 @@
 
 use std::path::PathBuf;
 
-use candle_lfm2_encoder::{Cascade, Lfm2SequenceClassifier, Lfm2SequenceRouter};
+use lfm2_encoder::{Cascade, Lfm2SequenceClassifier, Lfm2SequenceRouter};
 
 const ROUTER_MODEL: &str = "LFM2.5-Encoder-350M-Prompt-Router";
 

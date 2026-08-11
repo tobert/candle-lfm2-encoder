@@ -55,6 +55,7 @@ import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader, Dataset
 
+REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from finetune_sequence_classifier import (  # noqa: E402
     Lfm2ForSequenceClassification,
@@ -537,7 +538,7 @@ def main() -> None:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--data-dir", type=Path, default=Path("/home/atobey/.local/share/lfm2-training-data/prepared"))
     p.add_argument("--realistic-file", type=Path, default=None, help="default: <data-dir>/eval_realistic.jsonl")
-    p.add_argument("--base", type=Path, default=Path("/home/atobey/src/candle-lfm2-encoder/.models/LFM2.5-Encoder-350M"))
+    p.add_argument("--base", type=Path, default=REPO_ROOT / ".models/LFM2.5-Encoder-350M")
     p.add_argument("--runs-dir", type=Path, default=Path("/home/atobey/.local/share/lfm2-training-data/runs"))
     p.add_argument("--out-name", type=str, default="learning_curve.json")
     p.add_argument("--sizes", type=int, nargs="+", default=[100, 250, 500, 1000, 2000, 4000])

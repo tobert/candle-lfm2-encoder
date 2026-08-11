@@ -28,7 +28,7 @@ use std::path::PathBuf;
 use anyhow::{Context, Result, bail};
 use candle_core::{DType, Device, Tensor};
 use candle_nn::VarBuilder;
-use candle_lfm2_encoder::{Lfm2EncoderConfig, Lfm2Trunk};
+use lfm2_encoder::{Lfm2EncoderConfig, Lfm2Trunk};
 use tokenizers::Tokenizer;
 
 /// Fixed, matching v6's config. Order is the class id.

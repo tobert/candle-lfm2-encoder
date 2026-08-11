@@ -13,7 +13,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 
 use candle_core::{Device, Tensor};
-use candle_lfm2_encoder::{ColbertModel, Lfm2Trunk};
+use lfm2_encoder::{ColbertModel, Lfm2Trunk};
 
 const MODEL: &str = "LFM2.5-ColBERT-350M";
 

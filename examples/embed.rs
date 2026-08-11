@@ -8,7 +8,7 @@
 
 use std::time::Instant;
 
-use candle_lfm2_encoder::{cosine_similarity, Lfm2Embedding, TextKind};
+use lfm2_encoder::{cosine_similarity, Lfm2Embedding, TextKind};
 
 const DOCS: [&str; 5] = [
     "The borrow checker enforces Rust's ownership and lifetime rules at compile time.",
@@ -20,7 +20,7 @@ const DOCS: [&str; 5] = [
 
 const QUERY: &str = "how does Rust stop me from using a freed value?";
 
-fn main() -> candle_lfm2_encoder::Result<()> {
+fn main() -> lfm2_encoder::Result<()> {
     let dir = std::env::args().nth(1).unwrap_or_else(|| {
         eprintln!("usage: embed <checkpoint-dir>");
         std::process::exit(2);
@@ -40,7 +40,7 @@ fn main() -> candle_lfm2_encoder::Result<()> {
     let embedded: Vec<Vec<f32>> = DOCS
         .iter()
         .map(|d| model.embed_normalized(d, TextKind::Document))
-        .collect::<candle_lfm2_encoder::Result<_>>()?;
+        .collect::<lfm2_encoder::Result<_>>()?;
     let per_doc = t.elapsed() / DOCS.len() as u32;
 
     let mut ranked: Vec<(f32, &str)> = embedded

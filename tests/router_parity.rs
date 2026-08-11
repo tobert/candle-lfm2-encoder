@@ -26,7 +26,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 
 use candle_core::{Device, Tensor};
-use candle_lfm2_encoder::{Lfm2SequenceRouter, Lfm2Trunk};
+use lfm2_encoder::{Lfm2SequenceRouter, Lfm2Trunk};
 use serde::Deserialize;
 use tokenizers::Tokenizer;
 
@@ -154,7 +154,7 @@ fn tensor_vec1(t: &Tensor) -> Vec<f32> {
 /// `case2` and `case4` included, at this same `TOL`.
 const TOL: f32 = 5e-4;
 
-/// Assert one named stage of [`candle_lfm2_encoder::RouteComputation`]
+/// Assert one named stage of [`lfm2_encoder::RouteComputation`]
 /// against a flat reference vector, naming the case and stage on failure
 /// so a divergence localizes to pooling vs. projection vs. scale/softmax
 /// instead of only "the logits are wrong".
@@ -321,7 +321,7 @@ fn non_ascii_category_ranges_use_byte_offsets_confirmed_against_the_fixture() {
         .as_ref()
         .expect("non_ascii_japanese case must carry category_ranges_byte");
 
-    let ours: Vec<(usize, usize)> = candle_lfm2_encoder::routing::category_ranges(&case.routes);
+    let ours: Vec<(usize, usize)> = lfm2_encoder::routing::category_ranges(&case.routes);
     let byte_ranges: Vec<(usize, usize)> = byte_ranges.iter().map(|r| (r[0], r[1])).collect();
     let char_ranges: Vec<(usize, usize)> =
         case.category_ranges_char.iter().map(|r| (r[0], r[1])).collect();

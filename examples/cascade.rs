@@ -33,7 +33,7 @@
 
 use std::time::Instant;
 
-use candle_lfm2_encoder::{Cascade, Lfm2SequenceClassifier, Lfm2SequenceRouter};
+use lfm2_encoder::{Cascade, Lfm2SequenceClassifier, Lfm2SequenceRouter};
 use serde::Deserialize;
 
 /// One decomposed statement — identical shape to `examples/route.rs`'s
@@ -55,7 +55,7 @@ fn usage_and_exit() -> ! {
     std::process::exit(2);
 }
 
-fn main() -> candle_lfm2_encoder::Result<()> {
+fn main() -> lfm2_encoder::Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.len() < 2 {
         usage_and_exit();

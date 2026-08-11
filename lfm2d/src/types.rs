@@ -76,7 +76,7 @@ pub struct ModelInfo {
 // --------------------------------------------------------------- /embed
 
 /// Which side of `LFM2.5-Embedding-350M`'s asymmetric (E5-style) pair to
-/// embed as — see [`candle_lfm2_encoder::TextKind`]'s docs: the same text
+/// embed as — see [`lfm2_encoder::TextKind`]'s docs: the same text
 /// under `"query: "` vs `"document: "` embeds at cosine ≈ 0.70, so this is
 /// not cosmetic. TEI's own `/embed` has no such parameter (single-purpose
 /// embedders don't need one), so this is an ADDITIVE optional field a
@@ -153,7 +153,7 @@ pub struct ClassifyResult {
 // -------------------------------------------------------------- /v1/route
 
 /// Singular `input`, not `inputs` — one prompt scored against many routes
-/// in one forward pass (matching [`candle_lfm2_encoder::Lfm2SequenceRouter::route_cosines`]).
+/// in one forward pass (matching [`lfm2_encoder::Lfm2SequenceRouter::route_cosines`]).
 #[derive(Debug, Clone, Deserialize)]
 pub struct RouteRequest {
     pub input: String,
@@ -209,7 +209,7 @@ pub struct CascadeLane {
 
 /// One clause's full per-label breakdown, plus which single label scored
 /// highest (`top_severity`) — the ranking SUM used to pick the winner
-/// (`severity_score` in [`candle_lfm2_encoder::ClauseVerdict`], the caller's
+/// (`severity_score` in [`lfm2_encoder::ClauseVerdict`], the caller's
 /// configured severe-label set summed) is deliberately not repeated here;
 /// see the crate root docs.
 #[derive(Debug, Clone, Serialize)]
@@ -292,12 +292,12 @@ pub struct SpanResult {
     /// Byte offset one past the span's last byte — same units as `start`.
     pub end: usize,
     /// Entity type with the BIOES prefix stripped, e.g. `credential.api_key`
-    /// — matches [`candle_lfm2_encoder::Span::label`] and the strings
+    /// — matches [`lfm2_encoder::Span::label`] and the strings
     /// `entity_types()` / `GET /v1/models`'s `labels` enumerate.
     pub entity: String,
     /// Confidence in `[0, 1]`: the **minimum** softmax probability across
     /// the span's tokens, passed straight through from
-    /// [`candle_lfm2_encoder::Span::score`].
+    /// [`lfm2_encoder::Span::score`].
     ///
     /// Minimum rather than mean because a span is a CONJUNCTION of
     /// per-token decisions — it is wrong if any one token is wrong — so a

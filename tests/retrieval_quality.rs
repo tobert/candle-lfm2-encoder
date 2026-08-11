@@ -14,7 +14,7 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 
-use candle_lfm2_encoder::{cosine_similarity, Lfm2Embedding, TextKind};
+use lfm2_encoder::{cosine_similarity, Lfm2Embedding, TextKind};
 use serde::Deserialize;
 
 const MODEL: &str = "LFM2.5-Embedding-350M";

@@ -1,7 +1,10 @@
-# candle-lfm2-encoder
+# lfm2d
 
 LFM2.5 bidirectional encoders on candle. Read README.md for the what;
 this file is the working context.
+
+Repo `lfm2d` (renamed from `candle-lfm2-encoder` 2026-08-11), workspace of
+two crates: `lfm2-encoder` (library, repo root) and `lfm2d` (HTTP daemon).
 
 ## Where things are
 

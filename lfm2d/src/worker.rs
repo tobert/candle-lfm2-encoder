@@ -78,15 +78,15 @@ impl WorkerError {
 }
 
 /// Map the library's own error type onto the two-bucket [`WorkerError`]
-/// taxonomy. [`candle_lfm2_encoder::Error::InvalidInput`] is, by the
+/// taxonomy. [`lfm2_encoder::Error::InvalidInput`] is, by the
 /// library's own doc comment, "a caller-supplied argument that is
 /// structurally invalid" — exactly a 400. Everything else (I/O, config
 /// parse, tokenizer, candle numerics) is this SERVICE's problem to explain,
 /// not the caller's mistake to fix by rephrasing the request — a 500.
-impl From<candle_lfm2_encoder::Error> for WorkerError {
-    fn from(err: candle_lfm2_encoder::Error) -> Self {
+impl From<lfm2_encoder::Error> for WorkerError {
+    fn from(err: lfm2_encoder::Error) -> Self {
         match err {
-            candle_lfm2_encoder::Error::InvalidInput(msg) => WorkerError::BadRequest(msg),
+            lfm2_encoder::Error::InvalidInput(msg) => WorkerError::BadRequest(msg),
             other => WorkerError::Internal(other.to_string()),
         }
     }
@@ -139,7 +139,7 @@ pub trait InferenceEngine: Send + 'static {
     /// 1 is loaded, and always a 400 if it names an id nothing loaded.
     fn spans(&self, inputs: &[String], model: Option<&str>) -> Result<SpansOutcome, WorkerError>;
     /// As [`Self::spans`], filtered to the `credential.*` entity family —
-    /// see `candle_lfm2_encoder::Lfm2TokenClassifier::credentials`.
+    /// see `lfm2_encoder::Lfm2TokenClassifier::credentials`.
     fn spans_credentials(&self, inputs: &[String], model: Option<&str>) -> Result<SpansOutcome, WorkerError>;
 }
 

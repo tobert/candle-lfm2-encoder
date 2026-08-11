@@ -18,7 +18,7 @@
 use std::time::{Duration, Instant};
 
 use candle_core::{DType, Device};
-use candle_lfm2_encoder::{Lfm2Embedding, TextKind};
+use lfm2_encoder::{Lfm2Embedding, TextKind};
 
 const WORKLOAD: [&str; 8] = [
     "how does the borrow checker prevent use-after-free",
@@ -74,7 +74,7 @@ fn run_workload(model: &Lfm2Embedding, passes: usize) -> Duration {
     t.elapsed() / (passes * WORKLOAD.len()) as u32
 }
 
-fn main() -> candle_lfm2_encoder::Result<()> {
+fn main() -> lfm2_encoder::Result<()> {
     let mut args: Vec<String> = std::env::args().skip(1).collect();
     let mut dtype = DType::F32;
     if let Some(i) = args.iter().position(|a| a == "--dtype") {
@@ -106,7 +106,7 @@ fn main() -> candle_lfm2_encoder::Result<()> {
                 .unwrap_or_else(|| d.clone());
             Ok((name, Lfm2Embedding::from_dir_with(d, dtype, &Device::Cpu)?))
         })
-        .collect::<candle_lfm2_encoder::Result<_>>()?;
+        .collect::<lfm2_encoder::Result<_>>()?;
 
     println!("{} models resident: {:.2} GiB RSS\n", models.len(), rss_mib() / 1024.0);
 

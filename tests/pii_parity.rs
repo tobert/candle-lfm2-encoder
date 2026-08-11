@@ -10,7 +10,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 
 use candle_core::{Device, Tensor};
-use candle_lfm2_encoder::{Lfm2Trunk, Lfm2TokenClassifier};
+use lfm2_encoder::{Lfm2Trunk, Lfm2TokenClassifier};
 use serde::Deserialize;
 
 const MODEL: &str = "LFM2.5-Encoder-350M-PII-Detector";
@@ -242,7 +242,7 @@ fn credentials_catches_bearer_tokens_and_cloud_keys() {
 /// apart from what any one checkpoint happens to emit.
 #[test]
 fn is_secret_label_covers_the_credential_family_and_login_credentials() {
-    use candle_lfm2_encoder::is_secret_label;
+    use lfm2_encoder::is_secret_label;
 
     for yes in [
         "credential.api_key",

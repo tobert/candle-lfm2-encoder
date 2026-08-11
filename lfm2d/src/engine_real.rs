@@ -18,7 +18,7 @@
 
 use std::path::Path;
 
-use candle_lfm2_encoder::{
+use lfm2_encoder::{
     resolve_severe_labels, Cascade, Lfm2Embedding, Lfm2EncoderConfig, Lfm2SequenceClassifier,
     Lfm2SequenceRouter, Lfm2TokenClassifier, TextKind,
 };
@@ -49,7 +49,7 @@ fn model_id_from_dir(dir: &Path) -> String {
 
 /// `hidden_size` is read directly from `config.json` rather than from any
 /// loaded head object: none of [`Lfm2Embedding`]/[`Lfm2SequenceClassifier`]/
-/// [`Lfm2SequenceRouter`]/[`candle_lfm2_encoder::Lfm2Trunk`] exposes it
+/// [`Lfm2SequenceRouter`]/[`lfm2_encoder::Lfm2Trunk`] exposes it
 /// uniformly (`Lfm2Embedding::dim` exists; the others don't), and every
 /// head's checkpoint carries this same `config.json` regardless of which
 /// head it is, so reading it directly is both simpler and uniform across
@@ -217,14 +217,14 @@ impl RealEngine {
     }
 }
 
-/// [`candle_lfm2_encoder::Span`] → the wire [`SpanResult`]: byte offsets and
+/// [`lfm2_encoder::Span`] → the wire [`SpanResult`]: byte offsets and
 /// label unchanged, and `score` straight through from the library.
 ///
 /// That score is the MINIMUM softmax confidence over the span's tokens, not
-/// a mean — see [`candle_lfm2_encoder::Span::score`]. It reads lower than
+/// a mean — see [`lfm2_encoder::Span::score`]. It reads lower than
 /// the equivalent number from tools that average; that is deliberate and
 /// must not be "corrected" here.
-fn to_wire_span(span: candle_lfm2_encoder::Span) -> SpanResult {
+fn to_wire_span(span: lfm2_encoder::Span) -> SpanResult {
     SpanResult { start: span.start, end: span.end, entity: span.label, score: span.score }
 }
 

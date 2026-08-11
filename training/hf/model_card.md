@@ -37,7 +37,7 @@ companion Agent Command Risk dataset (kube-ordinal config, v3 split).
 Built for agent boundary guards: ~89 ms/statement on CPU f32 via
 [candle](https://github.com/huggingface/candle) with no Python at
 inference time. The export layout loads directly in the
-`candle-lfm2-encoder` crate (`Lfm2SequenceClassifier::from_dir`); it also
+`lfm2-encoder` crate (`Lfm2SequenceClassifier::from_dir`); it also
 loads in transformers via the checkpoint's config (`id2label` included).
 
 ## This model is advisory — read this part

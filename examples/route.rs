@@ -26,7 +26,7 @@
 //! # Read this before trusting the `prob` column
 //!
 //! This checkpoint's softmax is measured to be SATURATED (see
-//! `candle_lfm2_encoder::routing`'s module docs): for a clear-cut match,
+//! `lfm2_encoder::routing`'s module docs): for a clear-cut match,
 //! the winning probability is close to a pure function of how many routes
 //! you passed in, not of how confident the match actually is. This example
 //! always prints `score` (the pre-softmax scaled logit) alongside `prob`
@@ -36,7 +36,7 @@
 
 use std::time::Instant;
 
-use candle_lfm2_encoder::Lfm2SequenceRouter;
+use lfm2_encoder::Lfm2SequenceRouter;
 use serde::Deserialize;
 
 #[derive(Deserialize)]
@@ -65,7 +65,7 @@ fn usage_and_exit() -> ! {
     std::process::exit(2);
 }
 
-fn main() -> candle_lfm2_encoder::Result<()> {
+fn main() -> lfm2_encoder::Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.is_empty() {
         usage_and_exit();
@@ -369,7 +369,7 @@ fn argmax(cosines: &[f32]) -> usize {
         .unwrap_or(0)
 }
 
-fn print_ranked(model: &Lfm2SequenceRouter, text: &str, routes: &[String], show_scores: bool) -> candle_lfm2_encoder::Result<()> {
+fn print_ranked(model: &Lfm2SequenceRouter, text: &str, routes: &[String], show_scores: bool) -> lfm2_encoder::Result<()> {
     let scores = model.route_scores(text, routes)?;
     let probs = model.route_probs(text, routes)?;
     let mut ranked: Vec<(usize, f32, f32)> = (0..routes.len())
@@ -397,7 +397,7 @@ fn run_single(
     routes: &[String],
     show_scores: bool,
     threshold: Option<f32>,
-) -> candle_lfm2_encoder::Result<()> {
+) -> lfm2_encoder::Result<()> {
     println!("\nprompt: {text}\n");
     print_ranked(model, text, routes, show_scores)?;
 

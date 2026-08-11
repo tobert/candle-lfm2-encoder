@@ -77,7 +77,7 @@ pub struct StubEngine {
     pub classifier: Option<StubModel>,
     /// Order is the label id order — `predict`/`classify` output follows
     /// it, same contract as the real
-    /// [`candle_lfm2_encoder::Lfm2SequenceClassifier::labels`].
+    /// [`lfm2_encoder::Lfm2SequenceClassifier::labels`].
     pub classifier_labels: Vec<String>,
     pub router: Option<StubModel>,
     /// Zero, one, or many loaded token-classification heads — mirrors

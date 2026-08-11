@@ -12,7 +12,7 @@
 use std::time::Instant;
 
 use candle_core::{DType, Device};
-use candle_lfm2_encoder::{Lfm2Embedding, TextKind};
+use lfm2_encoder::{Lfm2Embedding, TextKind};
 
 /// Resident set size in MiB, from /proc/self/status.
 fn rss_mib() -> f64 {
@@ -32,7 +32,7 @@ fn rss_mib() -> f64 {
 
 const PROBE: &str = "how does the borrow checker prevent use-after-free in Rust?";
 
-fn main() -> candle_lfm2_encoder::Result<()> {
+fn main() -> lfm2_encoder::Result<()> {
     let mut args: Vec<String> = std::env::args().skip(1).collect();
 
     let mut dtype = DType::F32;

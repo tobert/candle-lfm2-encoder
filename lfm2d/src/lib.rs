@@ -50,7 +50,7 @@
 //! # Cascade configuration is server-side, not per-request
 //!
 //! `POST /v1/cascade` takes only `{"clauses": [...]}`. The library's
-//! [`candle_lfm2_encoder::Cascade::run`] additionally needs `routes` (the
+//! [`lfm2_encoder::Cascade::run`] additionally needs `routes` (the
 //! candidate lanes) and `severe_labels` (which of the classifier's own
 //! labels count toward the ranking sum) — this daemon takes both as
 //! **startup** configuration (`--cascade-route` repeatable, matching

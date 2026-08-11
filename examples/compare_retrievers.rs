@@ -11,7 +11,7 @@
 
 use std::time::Instant;
 
-use candle_lfm2_encoder::{cosine_similarity, ColbertModel, Lfm2Embedding, MultiVector, TextKind};
+use lfm2_encoder::{cosine_similarity, ColbertModel, Lfm2Embedding, MultiVector, TextKind};
 use serde::Deserialize;
 
 #[derive(Deserialize)]
@@ -104,7 +104,7 @@ fn tally(
     )
 }
 
-fn main() -> candle_lfm2_encoder::Result<()> {
+fn main() -> lfm2_encoder::Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.len() < 2 {
         eprintln!("usage: compare_retrievers <embedding-dir> <colbert-dir>");
@@ -128,7 +128,7 @@ fn main() -> candle_lfm2_encoder::Result<()> {
         .documents
         .iter()
         .map(|d| emb.embed_normalized(&d.text, TextKind::Document))
-        .collect::<candle_lfm2_encoder::Result<_>>()?;
+        .collect::<lfm2_encoder::Result<_>>()?;
     let emb_index_time = t.elapsed();
 
     let (r1, r3, r5, hn, qt) = tally(&corpus, &ids, |q| {
@@ -160,7 +160,7 @@ fn main() -> candle_lfm2_encoder::Result<()> {
         .documents
         .iter()
         .map(|d| colbert.encode_document(&d.text))
-        .collect::<candle_lfm2_encoder::Result<_>>()?;
+        .collect::<lfm2_encoder::Result<_>>()?;
     let cb_index_time = t.elapsed();
 
     let (r1, r3, r5, hn, qt) = tally(&corpus, &ids, |q| {

@@ -2,7 +2,7 @@
 //! Hub 2026-08-03, see fixtures/) — the family's checkpoints disagree with
 //! each other in ways transcription from docs would have missed.
 
-use candle_lfm2_encoder::{EncoderArch, LayerType, Lfm2EncoderConfig};
+use lfm2_encoder::{EncoderArch, LayerType, Lfm2EncoderConfig};
 
 fn fixture(name: &str) -> Lfm2EncoderConfig {
     let path = format!("{}/tests/fixtures/{name}.config.json", env!("CARGO_MANIFEST_DIR"));

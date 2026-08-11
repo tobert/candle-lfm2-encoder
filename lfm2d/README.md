@@ -1,6 +1,6 @@
 # lfm2d
 
-HTTP sidecar/daemon serving `candle-lfm2-encoder` heads over a Unix domain
+HTTP sidecar/daemon serving `lfm2-encoder` heads over a Unix domain
 socket and/or TCP, from ONE process. Built because:
 
 - candle's `from_mmaped_safetensors` copies every tensor into private

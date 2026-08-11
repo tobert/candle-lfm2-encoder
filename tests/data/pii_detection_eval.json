@@ -1,7 +1,7 @@
 {
   "description": "Synthetic evaluation fixtures for LFM2.5-Encoder-350M-PII-Detector, shaped around kaibo's boundary-guard use case: scanning text read from foreign repositories and outbound batch payloads for credentials and personal data before they reach a third-party model API.",
   "generated": "2026-08-04",
-  "warning": "All values in this file are synthetic and non-functional (fake API keys, RFC 5737/2606 documentation addresses, 555-01xx reserved phone numbers, truncated placeholder PEM key material). No value here is a real credential or real personal data. See tests/data/pii_detection_eval.json header and candle-lfm2-encoder/CLAUDE.md for provenance.",
+  "warning": "All values in this file are synthetic and non-functional (fake API keys, RFC 5737/2606 documentation addresses, 555-01xx reserved phone numbers, truncated placeholder PEM key material). No value here is a real credential or real personal data. See tests/data/pii_detection_eval.json header and CLAUDE.md at the repo root for provenance.",
   "label_source": "tests/fixtures/LFM2.5-Encoder-350M-PII-Detector.config.json id2label (BIOES over 40 entity types, 161 labels)",
   "categories": {
     "leaked-credential": "Text where a real (synthetic-but-structurally-valid) secret is present and MUST be caught before shipping outbound.",

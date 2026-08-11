@@ -21,7 +21,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use candle_lfm2_encoder::{Lfm2SequenceClassifier, Lfm2Trunk};
+use lfm2_encoder::{Lfm2SequenceClassifier, Lfm2Trunk};
 
 /// Where the specialist checkpoint lives; override with `LFM2_SEQ_CLF_DIR`.
 /// Not under `.models/` (which holds LiquidAI's own Hub checkpoints) — this

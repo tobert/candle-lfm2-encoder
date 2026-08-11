@@ -14,7 +14,7 @@
 use std::sync::Arc;
 use std::time::Instant;
 
-use candle_lfm2_encoder::{Lfm2SequenceClassifier, Lfm2Trunk};
+use lfm2_encoder::{Lfm2SequenceClassifier, Lfm2Trunk};
 
 /// Resident set size in MiB, from /proc/self/status.
 fn rss_mib() -> f64 {
@@ -28,7 +28,7 @@ fn rss_mib() -> f64 {
     0.0
 }
 
-fn main() -> candle_lfm2_encoder::Result<()> {
+fn main() -> lfm2_encoder::Result<()> {
     let dir = std::env::args().nth(1).unwrap_or_else(|| {
         eprintln!("usage: bench_shared_trunk <sequence-classifier-checkpoint-dir>");
         std::process::exit(2);

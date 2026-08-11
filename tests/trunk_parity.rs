@@ -16,7 +16,7 @@ use std::path::PathBuf;
 
 use candle_core::{DType, Device, Tensor};
 use candle_nn::VarBuilder;
-use candle_lfm2_encoder::{Lfm2EncoderConfig, Lfm2Trunk};
+use lfm2_encoder::{Lfm2EncoderConfig, Lfm2Trunk};
 
 const MODEL: &str = "LFM2.5-Embedding-350M";
 
