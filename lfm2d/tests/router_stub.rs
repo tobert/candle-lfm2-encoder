@@ -255,6 +255,21 @@ async fn v1_classify_carries_scores_top_model_id_and_weight_hash_in_body() {
     assert!((sum - 1.0).abs() < 1e-3, "sum={sum}");
 }
 
+/// End-to-end counterpart of the serde test: a bare string must reach the
+/// worker and come back as a batch of one, exactly as an array of one does.
+#[tokio::test]
+async fn v1_classify_accepts_a_bare_string_and_answers_with_a_batch_of_one() {
+    let (status, body, _) = post_json(
+        router_over(StubEngine::fully_configured()),
+        "/v1/classify",
+        json!({"inputs": "ls"}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body.as_array().expect("array response").len(), 1);
+    assert!(body[0]["scores"].is_object());
+}
+
 #[tokio::test]
 async fn v1_classify_with_no_classifier_configured_is_400() {
     let mut engine = StubEngine::fully_configured();

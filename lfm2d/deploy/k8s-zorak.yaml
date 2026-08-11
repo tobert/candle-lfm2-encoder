@@ -66,13 +66,14 @@ spec:
           # A real version, never `:latest`. `:latest` + IfNotPresent is
           # exactly how the situation above went unnoticed for a day.
           #
-          # Running imageID digest for 0.1.1, read back off the pod:
-          #   sha256:de4c3418fab163829baa2520decd890048e3d482b0eba75bb4aaf13777e7a757
-          # (0.1.0 was sha256:9259e4c0…, kept only as the rollback target.)
+          # Running imageID digest for 0.1.2, read back off the pod:
+          #   sha256:e9c494f4a2e1a826a1275cbc63254b39187738f77094c12938c978a0c59d2ed8
+          # (0.1.1 was sha256:de4c3418…; 0.1.0 sha256:9259e4c0… — rollback
+          # targets, both still in the registry.)
           # Bump this comment WITH the tag — a digest recorded next to a
           # different version is worse than no digest, because it reads as
-          # verified.
-          image: 192.168.1.2:3000/amy/lfm2d:0.1.1
+          # verified. It went stale within one deploy of being written.
+          image: 192.168.1.2:3000/amy/lfm2d:0.1.2
           imagePullPolicy: IfNotPresent
           args:
             # kube_ordinal_v8 — accepted by Amy 2026-08-11. v6 remains

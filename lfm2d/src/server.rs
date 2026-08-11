@@ -235,10 +235,13 @@ async fn classify(
     State(state): State<Arc<AppState>>,
     ValidJson(req): ValidJson<ClassifyRequest>,
 ) -> Result<Json<Vec<ClassifyResult>>, ApiErrorResponse> {
-    if req.inputs.is_empty() {
+    // `Inputs` normalizes the string-or-array forms; a bare string is
+    // always one input, so only the explicit-empty-array case can be empty.
+    let inputs = req.inputs.into_vec();
+    if inputs.is_empty() {
         return Err(bad_request("inputs must not be empty"));
     }
-    state.worker.classify(req.inputs).await.map(Json).map_err(map_worker_error)
+    state.worker.classify(inputs).await.map(Json).map_err(map_worker_error)
 }
 
 /// `POST /v1/route` — `{"input": str, "routes": [str,...]}` → per route

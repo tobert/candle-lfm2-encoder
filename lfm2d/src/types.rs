@@ -115,12 +115,27 @@ pub struct LabelScore {
 
 // ----------------------------------------------------------- /v1/classify
 
-/// Unlike `/embed`/`/predict`, `/v1/classify` takes an array only — no
-/// bare-string shorthand. This is "our full contract," not a TEI-compat
-/// shim, so there is no legacy client to stay bug-compatible with.
+/// Takes the same string-or-array [`Inputs`] as every other endpoint.
+///
+/// This originally accepted an array ONLY, reasoning that `/v1/classify` is
+/// our own contract rather than a TEI-compat shim and so owes no client
+/// bug-compatibility. That reasoning was sound and still produced the wrong
+/// answer, because `/v1/spans` is equally our own contract and accepts the
+/// bare-string form — so the rule wasn't "our endpoints are strict," it was
+/// "this one endpoint is different," which is just an inconsistency wearing
+/// a justification.
+///
+/// The cost was real and measured on a live caller: `{"inputs": "ls"}`
+/// succeeded against `/predict` and `/v1/spans` and returned 400 from
+/// `/v1/classify`, in the same session where the same field name had
+/// already been fumbled once. An API is allowed to be strict, but not
+/// unpredictably strict — a caller should learn the request shape once.
+///
+/// The response is unchanged: always an array, one entry per input, batch
+/// of one for a single string.
 #[derive(Debug, Clone, Deserialize)]
 pub struct ClassifyRequest {
-    pub inputs: Vec<String>,
+    pub inputs: Inputs,
 }
 
 /// One input's full result: the full softmax (`scores`, every label), the

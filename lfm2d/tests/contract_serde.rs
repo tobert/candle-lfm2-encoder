@@ -151,7 +151,20 @@ fn model_info_for_a_classifier_carries_labels() {
 #[test]
 fn classify_request_takes_an_inputs_array() {
     let req: ClassifyRequest = serde_json::from_str(r#"{"inputs": ["rm -rf /"]}"#).expect("parse");
-    assert_eq!(req.inputs, vec!["rm -rf /".to_string()]);
+    assert_eq!(req.inputs.into_vec(), vec!["rm -rf /".to_string()]);
+}
+
+/// `/v1/classify` must accept the bare-string form too. It used to take an
+/// array only — deliberately, on the reasoning that it is our own contract
+/// rather than a TEI-compat shim. But `/v1/spans` is equally our own and
+/// always accepted a bare string, so the real rule was "this one endpoint
+/// differs," which cost a live caller a 400 on `{"inputs": "ls"}` that
+/// `/predict` and `/v1/spans` both accepted. An API may be strict; it may
+/// not be unpredictably strict.
+#[test]
+fn classify_request_also_takes_a_bare_string_like_every_other_endpoint() {
+    let req: ClassifyRequest = serde_json::from_str(r#"{"inputs": "ls"}"#).expect("parse");
+    assert_eq!(req.inputs.into_vec(), vec!["ls".to_string()]);
 }
 
 #[test]
