@@ -45,13 +45,30 @@ spec:
       terminationGracePeriodSeconds: 30
       containers:
         - name: lfm2d
-          # ghcr once the package exists; for a `k3s ctr images import`
-          # tarball instead, keep the localhost/ name the tarball was
-          # tagged with. IfNotPresent matters in BOTH cases: an imported
-          # image exists only on nodes it was imported to, and a pod that
-          # reschedules elsewhere would otherwise sit in ImagePullBackOff
-          # trying a registry that doesn't have it.
-          image: ghcr.io/tobert/lfm2d:latest
+          # brak's LAN gitea registry (plain HTTP, LAN-only by design;
+          # zorak's /etc/rancher/k3s/registries.yaml carries the mirror
+          # entry, so no imagePullSecret is needed — anonymous pull is
+          # allowed and was verified end-to-end 2026-08-11).
+          #
+          # This replaces `ghcr.io/tobert/lfm2d:latest`, which was never
+          # actually published: that push was blocked on a missing
+          # `write:packages` scope and a `k3s ctr images import` tarball
+          # was used instead. The cluster was therefore running an image
+          # that existed ONLY in zorak's containerd, under a name pointing
+          # at a registry that would refuse to serve it. Nothing was wrong
+          # while the node kept the image, but a reschedule after an image
+          # GC — or a zorak rebuild — would have surfaced as ErrImagePull
+          # and read as a registry problem rather than a never-published
+          # image. GHCR returns "denied" for private AND nonexistent repos
+          # by design, so the error would have sent someone hunting for an
+          # imagePullSecret that could not exist.
+          #
+          # A real version, never `:latest`. `:latest` + IfNotPresent is
+          # exactly how the situation above went unnoticed for a day.
+          # Registry manifest digest for this tag, verified by hashing the
+          # served bytes rather than trusting Docker-Content-Digest:
+          #   sha256:9259e4c01999ab9360ea4073b20918740944061632aec402bed60b9019924352
+          image: 192.168.1.2:3000/amy/lfm2d:0.1.0
           imagePullPolicy: IfNotPresent
           args:
             # kube_ordinal_v8 — accepted by Amy 2026-08-11. v6 remains
