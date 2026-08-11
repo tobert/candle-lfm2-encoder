@@ -199,6 +199,72 @@ fn clean_text_produces_no_spans() {
     }
 }
 
+/// `credentials()` must catch the secret shapes a guard actually meets.
+///
+/// The regression this pins: the filter was `label.starts_with("credential.")`,
+/// which looks obviously right and silently missed two of the most common
+/// secrets there are. This checkpoint's taxonomy has BOTH a `credential.*`
+/// family and `developer.login_credentials`, and the model routes bearer
+/// tokens and cloud access keys to the latter — so `/v1/spans/credentials`
+/// returned NOTHING for a JWT the model scored at 0.97. Prefix-matching a
+/// label family assumed the taxonomy's naming was semantic; it isn't.
+///
+/// Asserts detection, not a specific label, so retuning the secret set or
+/// swapping checkpoints keeps this honest rather than pinning today's answer.
+#[test]
+fn credentials_catches_bearer_tokens_and_cloud_keys() {
+    let m = model();
+
+    // Obvious fakes: AWS's own documentation-example key, and a JWT whose
+    // payload decodes to {"sub":"12345"}.
+    let cases = [
+        "export AWS_ACCESS_KEY_ID=AKIAIOSFODNN7EXAMPLE",
+        "Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NSJ9.abc",
+        "db_url = postgres://admin:hunter2@10.0.0.5:5432/prod",
+    ];
+
+    for text in cases {
+        let creds = m.credentials(text).expect("credentials");
+        assert!(
+            !creds.is_empty(),
+            "credentials() found nothing in {text:?} — a guard calling this would fail OPEN. \
+             All spans the model did find: {:?}",
+            m.predict(text)
+                .expect("predict")
+                .iter()
+                .map(|s| (s.label.clone(), s.score))
+                .collect::<Vec<_>>()
+        );
+    }
+}
+
+/// The secret-set predicate, without a model — so the policy is testable
+/// apart from what any one checkpoint happens to emit.
+#[test]
+fn is_secret_label_covers_the_credential_family_and_login_credentials() {
+    use candle_lfm2_encoder::is_secret_label;
+
+    for yes in [
+        "credential.api_key",
+        "credential.jwt",
+        "credential.private_key",
+        "credential.connection_string",
+        "credential.password",
+        "developer.login_credentials",
+    ] {
+        assert!(is_secret_label(yes), "{yes} must count as a secret");
+    }
+    for no in [
+        "developer.device_id", // an identifier, not a secret
+        "contact.email",
+        "online.username",
+        "org.company_name",
+        "O",
+    ] {
+        assert!(!is_secret_label(no), "{no} must NOT count as a secret");
+    }
+}
+
 /// `Span::score` must be a real per-span confidence, never a constant.
 ///
 /// This guards a specific regression: the first cut of the `lfm2d` spans

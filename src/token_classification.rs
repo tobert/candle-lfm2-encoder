@@ -72,6 +72,42 @@ impl Span {
     }
 }
 
+/// Entity types that are SECRETS — the set [`Lfm2TokenClassifier::credentials`]
+/// filters to, and the one a boundary guard keys on.
+///
+/// The whole `credential.*` family, **plus `developer.login_credentials`**.
+/// That second one is not tidiness: the PII checkpoint's taxonomy carries a
+/// `credential.*` family *and* a `developer.*` one, and the model routes real
+/// secrets to the latter. Measured against the live checkpoint 2026-08-11:
+///
+/// ```text
+/// postgres://admin:hunter2@10.0.0.5:5432/prod -> credential.connection_string
+/// Authorization: Bearer eyJhbGciOiJIUzI1Ni...  -> developer.login_credentials 0.972
+/// AWS_ACCESS_KEY_ID=AKIAIOSFODNN7EXAMPLE       -> developer.login_credentials 0.596
+/// ```
+///
+/// A `credential.`-prefix filter therefore returned NOTHING for a JWT the
+/// model was 97% sure about, and nothing for an AWS access key — a guard
+/// trusting it would fail open, silently, on two of the most common secret
+/// shapes there are. Note `credential.jwt` exists in the taxonomy; the model
+/// simply doesn't use it for bearer tokens. Prefix-matching a label family
+/// assumed the taxonomy's naming was semantic, and it isn't.
+///
+/// `developer.device_id` is deliberately EXCLUDED — an identifier, not a
+/// secret.
+///
+/// This is a starting set, not a settled one (Amy, 2026-08-11: *"do the
+/// simple thing now, we'll tune the classifiers over time"*). Widen it from
+/// measurement — check what the model actually emits for a secret shape
+/// before assuming a label name covers it.
+pub const SECRET_ENTITY_TYPES: &[&str] = &["developer.login_credentials"];
+
+/// Whether an entity type counts as a secret: any `credential.*`, or a
+/// member of [`SECRET_ENTITY_TYPES`].
+pub fn is_secret_label(label: &str) -> bool {
+    label.starts_with("credential.") || SECRET_ENTITY_TYPES.contains(&label)
+}
+
 /// A loaded token-classification checkpoint.
 #[derive(Debug)]
 pub struct Lfm2TokenClassifier {
@@ -340,7 +376,7 @@ impl Lfm2TokenClassifier {
         Ok(self
             .predict(text)?
             .into_iter()
-            .filter(|s| s.label.starts_with("credential."))
+            .filter(|s| is_secret_label(&s.label))
             .collect())
     }
 }

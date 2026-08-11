@@ -58,5 +58,7 @@ pub use embedding::{cosine_similarity, Lfm2Embedding, TextKind};
 pub use error::{Error, Result};
 pub use routing::{ClauseRouting, Lfm2SequenceRouter, RouteComputation, RouteMatch};
 pub use sequence_classification::Lfm2SequenceClassifier;
-pub use token_classification::{Lfm2TokenClassifier, Span};
+pub use token_classification::{
+    is_secret_label, Lfm2TokenClassifier, Span, SECRET_ENTITY_TYPES,
+};
 pub use trunk::Lfm2Trunk;

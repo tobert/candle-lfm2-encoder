@@ -65,10 +65,14 @@ spec:
           #
           # A real version, never `:latest`. `:latest` + IfNotPresent is
           # exactly how the situation above went unnoticed for a day.
-          # Registry manifest digest for this tag, verified by hashing the
-          # served bytes rather than trusting Docker-Content-Digest:
-          #   sha256:9259e4c01999ab9360ea4073b20918740944061632aec402bed60b9019924352
-          image: 192.168.1.2:3000/amy/lfm2d:0.1.0
+          #
+          # Running imageID digest for 0.1.1, read back off the pod:
+          #   sha256:de4c3418fab163829baa2520decd890048e3d482b0eba75bb4aaf13777e7a757
+          # (0.1.0 was sha256:9259e4c0…, kept only as the rollback target.)
+          # Bump this comment WITH the tag — a digest recorded next to a
+          # different version is worse than no digest, because it reads as
+          # verified.
+          image: 192.168.1.2:3000/amy/lfm2d:0.1.1
           imagePullPolicy: IfNotPresent
           args:
             # kube_ordinal_v8 — accepted by Amy 2026-08-11. v6 remains
@@ -86,6 +90,15 @@ spec:
             # names it, so /v1/cascade would error on every call.
             - --classifier-dir=/models/kube_ordinal_v8
             - --router-dir=/models/LFM2.5-Encoder-350M-Prompt-Router
+            # Token-classification head backing /v1/spans and
+            # /v1/spans/credentials. A THIRD resident trunk: heads only
+            # share a trunk when trained on a common frozen one, and this
+            # is a LiquidAI-shipped specialist — measured, it shares 0 of
+            # 148 trunk tensors with the base encoder, and our finetuned
+            # classifier diverges from both. So this is ~1.4 GiB of its
+            # own, not a marginal cost. The flag is repeatable; a second
+            # head here would make the request field mandatory.
+            - --token-classifier-dir=/models/LFM2.5-Encoder-350M-PII-Detector
             - --cascade-route=shell
             - --cascade-route=k8s
             # ORDER IS SEMANTIC: ascending severity, least severe first.
@@ -128,13 +141,24 @@ spec:
             failureThreshold: 30
           resources:
             requests:
-              # Measured numbers — see k8s.yaml's resources comment.
+              # MEASURED with all three heads resident, read from
+              # /proc/1/status in the running pod 2026-08-11:
+              #   VmRSS  4256096 kB = 4.06 GiB   steady
+              #   VmHWM  5620188 kB = 5.36 GiB   peak during checkpoint load
+              # (Two heads were 2.78 / 4.03 GiB, so the third trunk cost
+              # ~1.3 GiB steady — consistent with ~1.4 GiB/head.)
+              # 6Gi covers the load peak with modest headroom.
+              #
+              # Deliberately request-only, NO memory limit: the peak is a
+              # transient during checkpoint load, and a limit sized for
+              # steady state would OOMKill the pod while it starts.
+              #
               # Trivial on zorak (125 GiB), but the kubelet's free-memory
               # arithmetic there is OPTIMISTIC: host-level llama.cpp
               # servers outside k8s can claim 70+ GiB and
               # system-reserved isn't set yet (zorak session's
               # issues.md) — keep honest requests anyway.
-              memory: "4Gi"
+              memory: "6Gi"
               cpu: "4"
       volumes:
         - name: models
