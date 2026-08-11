@@ -199,6 +199,94 @@ fn clean_text_produces_no_spans() {
     }
 }
 
+/// `Span::score` must be a real per-span confidence, never a constant.
+///
+/// This guards a specific regression: the first cut of the `lfm2d` spans
+/// endpoint filled `score` with a hard-coded `1.0`, because the library's
+/// public surface exposed no probabilities at the time. A constant in a
+/// field named `score` is a silent wrong answer — a guard WILL rank on it —
+/// so the fix pushed the real softmax confidence out of the library, and
+/// this test exists so nobody can quietly put the constant back.
+#[test]
+fn span_scores_are_real_confidences_not_a_constant() {
+    let refs = reference();
+    let m = model();
+
+    let mut seen: Vec<f32> = Vec::new();
+    for case in refs.cases.iter() {
+        for span in m.predict(&case.text).expect("predict") {
+            assert!(
+                span.score > 0.0 && span.score <= 1.0,
+                "case {} span {:?} has score {} — not a probability",
+                case.id,
+                span.label,
+                span.score
+            );
+            seen.push(span.score);
+        }
+    }
+
+    assert!(!seen.is_empty(), "no spans fired across the reference set");
+
+    // If `score` were hard-coded, every value would be identical. Across the
+    // whole reference corpus the real softmax cannot be a single constant.
+    let first = seen[0];
+    assert!(
+        seen.iter().any(|s| (s - first).abs() > f32::EPSILON),
+        "every span scored exactly {first} across {} spans — `score` looks \
+         hard-coded rather than computed",
+        seen.len()
+    );
+}
+
+/// The span score is the MINIMUM over its tokens, not the mean or the max —
+/// the ruling is that a span is a conjunction of per-token decisions and is
+/// only as trustworthy as its weakest token. Pinned because switching to a
+/// mean would be an invisible change: still in `[0,1]`, still varying, still
+/// plausible, but systematically more confident about spans that contain a
+/// coin-flip token.
+#[test]
+fn span_score_is_the_minimum_over_its_tokens_not_the_mean() {
+    let refs = reference();
+    let m = model();
+
+    for case in refs.cases.iter() {
+        let spans = m.predict(&case.text).expect("predict");
+        if spans.is_empty() {
+            continue;
+        }
+        let confidences = m.token_confidences(&case.text).expect("token confidences");
+        let (_, offsets) = {
+            // Token byte offsets, recovered the same way `predict` sees them.
+            let ids = m.token_label_ids(&case.text).expect("token labels");
+            (ids, m.token_offsets(&case.text).expect("token offsets"))
+        };
+
+        for span in &spans {
+            // Every token overlapping the span contributed to it; the score
+            // must equal the smallest of their confidences.
+            let covered: Vec<f32> = offsets
+                .iter()
+                .zip(&confidences)
+                .filter(|((s, e), _)| *e > *s && *s >= span.start && *e <= span.end)
+                .map(|(_, &c)| c)
+                .collect();
+            if covered.is_empty() {
+                continue; // whitespace trimming can leave no exactly-covered token
+            }
+            let min = covered.iter().copied().fold(f32::INFINITY, f32::min);
+            assert!(
+                (span.score - min).abs() < 1e-6,
+                "case {} span {:?}: score {} but minimum covered-token confidence is {}",
+                case.id,
+                span.label,
+                span.score,
+                min
+            );
+        }
+    }
+}
+
 /// `Lfm2TokenClassifier::from_trunk`, over a trunk loaded once via
 /// `Lfm2Trunk::load_shared`, must reproduce `from_dir`'s per-token argmax
 /// EXACTLY on the real PII-Detector checkpoint — same weights, same math.

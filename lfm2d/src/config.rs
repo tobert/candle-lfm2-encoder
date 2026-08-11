@@ -30,6 +30,41 @@ pub struct Cli {
     #[arg(long, env = "LFM2D_ROUTER_DIR")]
     pub router_dir: Option<PathBuf>,
 
+    /// Directory holding an `Lfm2TokenClassifier`-shaped checkpoint —
+    /// REPEATABLE (pass `--token-classifier-dir` once per head, or a
+    /// comma-separated list via `LFM2D_TOKEN_CLASSIFIER_DIR`), unlike
+    /// `--embedder-dir`/`--classifier-dir`/`--router-dir` which each take
+    /// at most one. Each registers under a model id derived from its
+    /// directory basename, exactly like every other head — fully generic,
+    /// no checkpoint-specific logic anywhere (the PII detector is not
+    /// special-cased). Backs `POST /v1/spans` and
+    /// `POST /v1/spans/credentials`. With 2+ loaded, a request must name
+    /// which one via `"model"`; with exactly 1, it's implicit — see
+    /// `engine_real.rs`'s `resolve_token_classifier`.
+    #[arg(long = "token-classifier-dir", env = "LFM2D_TOKEN_CLASSIFIER_DIR", value_delimiter = ',')]
+    pub token_classifier_dir: Vec<PathBuf>,
+
+    /// Attach a hash of a `/v1/spans`/`/v1/spans/credentials` request's
+    /// input TEXT (never the text itself) to that call's trace/log span,
+    /// as an opt-in correlation aid — e.g. matching one detection call to
+    /// the same call logged by an upstream service, without either system
+    /// writing the caller's actual secret-bearing text anywhere. Defaults
+    /// OFF and is deliberately `ArgAction::Set` (must be spelled
+    /// `--log-input-hash true`, not just present) rather than a bare
+    /// switch — flipping on ANY per-request hashing on a secrets-detection
+    /// endpoint should be a considered operator choice, not a fat-fingered
+    /// flag. NEVER attached as an OTLP metric label regardless of this
+    /// setting — see `worker.rs`'s `spans`/`spans_credentials` and the
+    /// module docs' "Observability" section for why (unbounded per-input
+    /// cardinality would wreck VictoriaMetrics).
+    #[arg(
+        long = "log-input-hash",
+        env = "LFM2D_LOG_INPUT_HASH",
+        action = clap::ArgAction::Set,
+        default_value_t = false
+    )]
+    pub log_input_hash: bool,
+
     /// A cascade candidate route (repeatable), or a comma-separated list
     /// via `LFM2D_CASCADE_ROUTES`. `/v1/cascade` needs at least one; the
     /// request body carries only `clauses` (see the crate root docs on why
@@ -79,10 +114,10 @@ impl Cli {
     /// # Errors
     /// - neither `--socket-path` nor `--bind-addr` given: nothing to serve
     ///   on.
-    /// - none of `--embedder-dir`/`--classifier-dir`/`--router-dir` given:
-    ///   nothing to load, so this process would serve `/healthz` and
-    ///   nothing else — almost certainly a misconfiguration, not a
-    ///   deliberate deployment.
+    /// - none of `--embedder-dir`/`--classifier-dir`/`--router-dir`/
+    ///   `--token-classifier-dir` given: nothing to load, so this process
+    ///   would serve `/healthz` and nothing else — almost certainly a
+    ///   misconfiguration, not a deliberate deployment.
     pub fn validate(&self) -> Result<(), String> {
         if self.socket_path.is_none() && self.bind_addr.is_none() {
             return Err(
@@ -91,10 +126,15 @@ impl Cli {
                     .to_string(),
             );
         }
-        if self.embedder_dir.is_none() && self.classifier_dir.is_none() && self.router_dir.is_none() {
+        if self.embedder_dir.is_none()
+            && self.classifier_dir.is_none()
+            && self.router_dir.is_none()
+            && self.token_classifier_dir.is_empty()
+        {
             return Err(
                 "no models configured: pass at least one of --embedder-dir/--classifier-dir/\
-                 --router-dir (env LFM2D_EMBEDDER_DIR/LFM2D_CLASSIFIER_DIR/LFM2D_ROUTER_DIR)"
+                 --router-dir/--token-classifier-dir (env LFM2D_EMBEDDER_DIR/LFM2D_CLASSIFIER_DIR/\
+                 LFM2D_ROUTER_DIR/LFM2D_TOKEN_CLASSIFIER_DIR)"
                     .to_string(),
             );
         }
@@ -111,6 +151,8 @@ mod tests {
             embedder_dir: None,
             classifier_dir: None,
             router_dir: None,
+            token_classifier_dir: Vec::new(),
+            log_input_hash: false,
             cascade_routes: Vec::new(),
             cascade_severe_labels: vec!["mutating".into(), "destructive".into()],
             socket_path: None,
@@ -149,6 +191,8 @@ mod tests {
             embedder_dir: Some("/tmp/e".into()),
             classifier_dir: Some("/tmp/c".into()),
             router_dir: Some("/tmp/r".into()),
+            token_classifier_dir: vec!["/tmp/t".into()],
+            log_input_hash: true,
             cascade_routes: vec!["shell".into()],
             cascade_severe_labels: vec!["mutating".into()],
             socket_path: Some("/tmp/lfm2d.sock".into()),
@@ -156,5 +200,64 @@ mod tests {
             threads: Some(4),
         };
         cli.validate().expect("fully specified config is valid");
+    }
+
+    #[test]
+    fn a_token_classifier_dir_alone_satisfies_the_models_requirement() {
+        let mut cli = base();
+        cli.token_classifier_dir = vec!["/tmp/pii".into()];
+        cli.socket_path = Some("/tmp/lfm2d.sock".into());
+        cli.validate().expect("--token-classifier-dir alone is a valid model set");
+    }
+
+    #[test]
+    fn token_classifier_dir_is_repeatable() {
+        let cli = Cli {
+            token_classifier_dir: vec!["/tmp/pii".into(), "/tmp/secrets".into()],
+            socket_path: Some("/tmp/lfm2d.sock".into()),
+            ..base()
+        };
+        assert_eq!(cli.token_classifier_dir.len(), 2);
+        cli.validate().expect("2+ token-classifier dirs is valid config");
+    }
+
+    #[test]
+    fn log_input_hash_defaults_off() {
+        assert!(!base().log_input_hash, "a secrets-detection endpoint must not hash input by default");
+    }
+
+    // -------------------------------------------- real clap::Parser parsing
+    //
+    // Everything above builds a `Cli` by hand and never touches the
+    // `#[arg(...)]` attributes at all — a typo in `value_delimiter` or
+    // `action` would compile fine and pass every test above while silently
+    // breaking real CLI parsing. These two exercise `Cli::parse_from`
+    // directly, the same entry point `main.rs` uses via `Cli::parse()`.
+
+    #[test]
+    fn token_classifier_dir_parses_repeated_flags_and_comma_lists() {
+        let cli = Cli::parse_from([
+            "lfm2d",
+            "--token-classifier-dir",
+            "/models/pii",
+            "--token-classifier-dir",
+            "/models/secrets,/models/router-guard",
+        ]);
+        assert_eq!(
+            cli.token_classifier_dir,
+            vec![
+                PathBuf::from("/models/pii"),
+                PathBuf::from("/models/secrets"),
+                PathBuf::from("/models/router-guard"),
+            ]
+        );
+    }
+
+    #[test]
+    fn log_input_hash_requires_an_explicit_value_not_a_bare_flag() {
+        let cli = Cli::parse_from(["lfm2d", "--log-input-hash", "true"]);
+        assert!(cli.log_input_hash);
+        let cli = Cli::parse_from(["lfm2d"]);
+        assert!(!cli.log_input_hash, "must default to false when unset");
     }
 }

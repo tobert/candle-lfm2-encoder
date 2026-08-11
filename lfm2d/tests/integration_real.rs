@@ -53,6 +53,8 @@ fn cli_with_classifier_only() -> Cli {
         embedder_dir: None,
         classifier_dir: Some(dir),
         router_dir: None,
+        token_classifier_dir: Vec::new(),
+        log_input_hash: false,
         cascade_routes: Vec::new(),
         cascade_severe_labels: vec!["mutating".to_string(), "destructive".to_string()],
         socket_path: None,

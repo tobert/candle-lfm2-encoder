@@ -46,6 +46,22 @@ pub struct Span {
     /// Entity type with the BIOES prefix stripped, e.g.
     /// `credential.api_key`.
     pub label: String,
+    /// Confidence in this span: the **minimum** over its tokens of the
+    /// softmax probability of that token's predicted class.
+    ///
+    /// Minimum, not mean, because a span is a CONJUNCTION of per-token
+    /// decisions — it is wrong if any one of them is wrong, so its
+    /// trustworthiness is that of its weakest token. Averaging would hide
+    /// exactly the token that says the boundary may be misplaced, which for
+    /// a credential is the interesting failure. Amy's ruling, 2026-08-11.
+    ///
+    /// Consequence worth knowing: these read systematically LOWER than
+    /// services that average (Hugging Face's grouped-entity pipeline) or
+    /// report a recognizer's own confidence (Presidio). Do not compare the
+    /// numbers across tools. As everywhere else in this crate, it is a
+    /// ranking signal with no calibrated absolute meaning — nothing here
+    /// thresholds it.
+    pub score: f32,
 }
 
 impl Span {
@@ -193,8 +209,9 @@ impl Lfm2TokenClassifier {
         types
     }
 
-    /// Per-token predicted label ids, alongside each token's byte span.
-    fn token_labels(&self, text: &str) -> Result<(Vec<usize>, Vec<(usize, usize)>)> {
+    /// Per-token predicted label ids, alongside each token's byte span and
+    /// the softmax probability of the predicted class.
+    fn token_labels(&self, text: &str) -> Result<(Vec<usize>, Vec<(usize, usize)>, Vec<f32>)> {
         let encoding = self
             .tokenizer
             .encode(text, true)
@@ -207,8 +224,25 @@ impl Lfm2TokenClassifier {
         let hidden = self.trunk.forward(&input, None)?;
         let logits = self.classifier.forward(&hidden)?.to_dtype(DType::F32)?;
 
-        let best = logits.i(0)?.argmax(1)?.to_vec1::<u32>()?;
-        Ok((best.into_iter().map(|i| i as usize).collect(), offsets))
+        let logits = logits.i(0)?;
+        let best = logits.argmax(1)?.to_vec1::<u32>()?;
+
+        // Softmax over the label axis, then take the probability of the
+        // class that argmax already chose. Computed here rather than in a
+        // caller because reproducing the label ordering outside this file is
+        // how a 161-wide output gets silently mislabelled.
+        let probs = candle_nn::ops::softmax_last_dim(&logits)?.to_vec2::<f32>()?;
+        let confidences: Vec<f32> = best
+            .iter()
+            .zip(&probs)
+            .map(|(&class, row)| row[class as usize])
+            .collect();
+
+        Ok((
+            best.into_iter().map(|i| i as usize).collect(),
+            offsets,
+            confidences,
+        ))
     }
 
     /// Per-token predicted class ids, one per token including specials.
@@ -220,6 +254,24 @@ impl Lfm2TokenClassifier {
         Ok(self.token_labels(text)?.0)
     }
 
+    /// Per-token softmax probability of each token's own predicted class,
+    /// one per token including specials — the raw material behind
+    /// [`Span::score`], exposed for the same reason as
+    /// [`Self::token_label_ids`]: so a confidence question can be asked of
+    /// the MODEL without going through the span decode.
+    pub fn token_confidences(&self, text: &str) -> Result<Vec<f32>> {
+        Ok(self.token_labels(text)?.2)
+    }
+
+    /// Each token's byte span into `text`, one per token including specials
+    /// (which carry an empty `(n, n)` range). Same ordering as
+    /// [`Self::token_label_ids`] and [`Self::token_confidences`], so the
+    /// three zip together — which is what lets a test check the span decode
+    /// against the per-token evidence it was built from.
+    pub fn token_offsets(&self, text: &str) -> Result<Vec<(usize, usize)>> {
+        Ok(self.token_labels(text)?.1)
+    }
+
     /// Detect entities in `text`.
     ///
     /// Decoding follows the checkpoint's own `model_spans`, which is
@@ -228,12 +280,14 @@ impl Lfm2TokenClassifier {
     /// empty offset span (the specials) close the current span, and
     /// leading/trailing whitespace is trimmed off the result.
     pub fn predict(&self, text: &str) -> Result<Vec<Span>> {
-        let (label_ids, offsets) = self.token_labels(text)?;
+        let (label_ids, offsets, confidences) = self.token_labels(text)?;
 
         let mut spans: Vec<Span> = Vec::new();
         let mut current: Option<Span> = None;
 
-        for (&label_id, &(start, end)) in label_ids.iter().zip(&offsets) {
+        for ((&label_id, &(start, end)), &confidence) in
+            label_ids.iter().zip(&offsets).zip(&confidences)
+        {
             let label = self
                 .id2label
                 .get(label_id)
@@ -257,9 +311,12 @@ impl Lfm2TokenClassifier {
                     start,
                     end,
                     label: entity.to_string(),
+                    score: confidence,
                 });
             } else if let Some(c) = current.as_mut() {
                 c.end = end;
+                // Weakest link: see Span::score.
+                c.score = c.score.min(confidence);
             }
         }
         spans.extend(current);

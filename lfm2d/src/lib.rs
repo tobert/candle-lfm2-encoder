@@ -61,6 +61,26 @@
 //! are properties of how the service is deployed, not something each
 //! caller should be re-specifying (and re-trusting) per call. This is a
 //! judgment call the task spec left implicit; see `lfm2d/README.md`.
+//!
+//! # `/v1/spans` never returns the matched text
+//!
+//! `POST /v1/spans`/`POST /v1/spans/credentials` (backed by
+//! `--token-classifier-dir`, repeatable — the PII detector is the first
+//! consumer, but nothing here is special-cased to it) answer with byte
+//! OFFSETS and an entity TYPE only, never the substring that matched. The
+//! caller already has the full text it just sent; echoing a credential
+//! back would just create a second copy of it in every downstream log this
+//! response passes through. See `types::SpanResult`'s doc comment. Byte
+//! offsets (not codepoint/char offsets) — see the same doc comment for what
+//! that means for non-Rust callers.
+//!
+//! Telemetry for this endpoint is held to a stricter bar than the rest of
+//! this API for the same reason: request text carries live credentials by
+//! definition, so no span, log, or metric anywhere in this crate ever
+//! records input text, span offsets, or a matched substring. The one
+//! opt-in exception, `--log-input-hash` (default off), attaches a HASH of
+//! the input text to that call's trace/log span only — never a metric
+//! label (unbounded cardinality). See `worker.rs`'s module docs.
 
 pub mod config;
 pub mod engine_real;

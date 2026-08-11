@@ -46,6 +46,11 @@ pub enum ModelKind {
     Embedder,
     Classifier,
     Router,
+    /// A per-token BIOES span-detection head (`POST /v1/spans`,
+    /// `POST /v1/spans/credentials`) — the PII detector's shape, but not
+    /// special-cased to it: any checkpoint `Lfm2TokenClassifier::from_dir`
+    /// accepts registers under this kind.
+    TokenClassifier,
 }
 
 /// One entry in `GET /v1/models`'s response array.
@@ -54,10 +59,15 @@ pub struct ModelInfo {
     pub id: String,
     pub kind: ModelKind,
     pub weight_hash: String,
-    /// Only present for a classifier — an embedder/router has no fixed
-    /// label set (the router's "labels" are caller-supplied routes at call
-    /// time, not a trained output width; see `src/routing.rs`'s module
-    /// docs).
+    /// Only present for a classifier or a token classifier — an
+    /// embedder/router has no fixed label set (the router's "labels" are
+    /// caller-supplied routes at call time, not a trained output width; see
+    /// `src/routing.rs`'s module docs). For a token classifier this is
+    /// `entity_types()` (BIOES prefixes stripped, deduped), NOT the raw
+    /// `id2label` — the full BIOES-prefixed label set is 161 entries wide
+    /// on the PII checkpoint alone and duplicates every entity 5× (B-/I-/O-/
+    /// E-/S-); the distinct entity TYPE is the thing a caller of
+    /// `/v1/spans` actually cares about naming.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub labels: Option<Vec<String>>,
     pub hidden_size: usize,
@@ -215,6 +225,80 @@ pub struct CascadeResponse {
     pub lane: CascadeLane,
     pub clauses: Vec<CascadeClause>,
     pub models: Vec<CascadeModelRef>,
+}
+
+// -------------------------------------------------------------- /v1/spans
+
+/// `{"inputs": str | [str]}` (TEI-style, same [`Inputs`] normalization as
+/// `/embed`/`/predict`), plus an OPTIONAL `"model"` to pick which loaded
+/// token-classification head answers this call. Required only when 2+
+/// `--token-classifier-dir` heads are loaded — see `server::spans`'s doc
+/// comment and the crate root docs' "N token heads" section for the
+/// disambiguation rule.
+#[derive(Debug, Clone, Deserialize)]
+pub struct SpansRequest {
+    pub inputs: Inputs,
+    #[serde(default)]
+    pub model: Option<String>,
+}
+
+/// One detected span, on the wire. `POST /v1/spans` and
+/// `POST /v1/spans/credentials` respond with `Vec<Vec<SpanResult>>` — a
+/// bare array of arrays (TEI-shaped, no wrapper object; audit pair travels
+/// as `X-Model-Id`/`X-Model-Weight-Hash` headers same as `/embed`/
+/// `/predict` — see the crate root docs' "two response conventions").
+///
+/// # NEVER add the matched text to this type
+///
+/// However tempting a `word`/`quote`/`text` field looks (Presidio and GCP
+/// DLP both ship one, and it IS convenient for a caller who wants to log
+/// what matched) — do not add it, not even behind an opt-in flag. The
+/// caller already has the full input text it just sent us; all this field
+/// could ever do is duplicate a piece of it verbatim into every response
+/// this endpoint sends back, and this endpoint's entire reason to exist is
+/// finding credentials — echoing one back is a second place for it to leak
+/// into a log, a cache, a debugger's "pretty-print this JSON" pane, etc.
+/// GCP DLP ships an opt-in "no matched text" mode as a special case; this
+/// API is stricter on purpose and makes that the ONLY mode.
+#[derive(Debug, Clone, Serialize)]
+pub struct SpanResult {
+    /// Byte offset of the span's first byte into the UTF-8 input string
+    /// that was sent — NOT a codepoint/char index, NOT a UTF-16 code-unit
+    /// index. `Lfm2TokenClassifier::Span` (the library type this is built
+    /// from) documents itself as byte offsets and this type passes that
+    /// value through unmodified — see `engine_real.rs`'s `spans_outcome`.
+    /// A Rust caller (kaibo, the first consumer) can slice
+    /// `&text[start..end]` directly. A Python/JS caller must NOT index its
+    /// own string with these numbers directly — Python `str` and JS
+    /// strings are codepoint/UTF-16 indexed, not byte-indexed — it must
+    /// re-encode to UTF-8 bytes (or operate on the raw bytes it already
+    /// sent) before slicing.
+    pub start: usize,
+    /// Byte offset one past the span's last byte — same units as `start`.
+    pub end: usize,
+    /// Entity type with the BIOES prefix stripped, e.g. `credential.api_key`
+    /// — matches [`candle_lfm2_encoder::Span::label`] and the strings
+    /// `entity_types()` / `GET /v1/models`'s `labels` enumerate.
+    pub entity: String,
+    /// Confidence in `[0, 1]`: the **minimum** softmax probability across
+    /// the span's tokens, passed straight through from
+    /// [`candle_lfm2_encoder::Span::score`].
+    ///
+    /// Minimum rather than mean because a span is a CONJUNCTION of
+    /// per-token decisions — it is wrong if any one token is wrong — so a
+    /// single coin-flip token inside an otherwise confident credential is
+    /// the signal, and averaging would hide it. Amy's ruling, 2026-08-11.
+    ///
+    /// **These numbers read systematically LOWER than other PII services'**
+    /// (Hugging Face's grouped-entity pipeline averages; Presidio reports a
+    /// recognizer's own confidence). Do not compare them across tools, and
+    /// do not "fix" them upward here.
+    ///
+    /// As everywhere else in this API: a ranking signal, not a calibrated
+    /// absolute. Nothing in lfm2d thresholds it, and a caller that invents
+    /// a global cutoff is repeating the mistake measured in
+    /// `rank-within-dont-threshold-across`.
+    pub score: f32,
 }
 
 // ----------------------------------------------------------------- errors

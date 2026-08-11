@@ -46,8 +46,10 @@ CLI flags, each with an env-var fallback (`clap`'s `env` feature):
 | `--embedder-dir` | `LFM2D_EMBEDDER_DIR` | `Lfm2Embedding`-shaped checkpoint dir; backs `/embed` |
 | `--classifier-dir` | `LFM2D_CLASSIFIER_DIR` | `Lfm2SequenceClassifier`-shaped checkpoint dir; backs `/predict`, `/v1/classify`, `/v1/cascade` |
 | `--router-dir` | `LFM2D_ROUTER_DIR` | Prompt-Router checkpoint dir; backs `/v1/route`, `/v1/cascade` |
+| `--token-classifier-dir` (repeatable) | `LFM2D_TOKEN_CLASSIFIER_DIR` (comma-separated) | `Lfm2TokenClassifier`-shaped checkpoint dir(s) — REPEATABLE, unlike the three heads above; backs `/v1/spans`, `/v1/spans/credentials` |
 | `--cascade-route` (repeatable) | `LFM2D_CASCADE_ROUTES` (comma-separated) | Candidate routes for `/v1/cascade` — server-side config, not a request field |
 | `--cascade-severe-label` (repeatable) | `LFM2D_CASCADE_SEVERE_LABELS` (comma-separated) | Which classifier labels count toward the severity ranking sum; default `mutating,destructive` |
+| `--log-input-hash` | `LFM2D_LOG_INPUT_HASH` | `true`/`false`, must be spelled out (not a bare flag); default `false`. Attaches a hash of `/v1/spans`/`/v1/spans/credentials` request text — never the text itself — to that call's trace/log span; see "Observability" below |
 | `--socket-path` | `LFM2D_SOCKET_PATH` | Unix domain socket to serve on |
 | `--bind-addr` | `LFM2D_BIND_ADDR` | TCP address to serve on, e.g. `127.0.0.1:8088` |
 | `--threads` | `LFM2D_THREADS` | Size of rayon's global thread pool (candle's matmul runs on it transitively), set BEFORE any model load. Defaults to `std::thread::available_parallelism()` |
@@ -64,9 +66,12 @@ itself is synchronous and happens before the socket is ever bound: a bad
 checkpoint path or an incompatible config also fails loudly at startup
 (`exit 1`), never lazily on the first request.
 
-Only ONE model per head kind is supported — `/predict`, `/v1/classify`,
-`/v1/route` don't take a model-selection parameter, so a deployment serving
-multiple classifiers, say, needs multiple `lfm2d` processes.
+Only ONE model per head kind is supported for the embedder/classifier/router
+heads — `/predict`, `/v1/classify`, `/v1/route` don't take a model-selection
+parameter, so a deployment serving multiple classifiers, say, needs multiple
+`lfm2d` processes. Token classifiers are the one exception: `--token-classifier-dir`
+is repeatable, and `/v1/spans`/`/v1/spans/credentials` take an optional
+`"model"` field to pick among them — see the API section below.
 
 ## API (v1)
 
@@ -74,11 +79,14 @@ multiple classifiers, say, needs multiple `lfm2d` processes.
 - `GET /readyz` → `200` once every configured model has loaded, `503`
   before.
 - `GET /v1/models` → `[{id, kind, weight_hash, labels?, hidden_size}]` —
-  every loaded model. `kind` is `embedder`/`classifier`/`router`. `labels`
-  is present only for a classifier (an embedder/router has no fixed label
-  set). `weight_hash` is sha256 over the checkpoint's `model.safetensors`,
-  64 lowercase hex chars — the audit trail this whole daemon exists partly
-  to satisfy (kaish approval-chain rulings).
+  every loaded model. `kind` is `embedder`/`classifier`/`router`/
+  `token_classifier`. `labels` is present for a classifier (its full label
+  set) or a token classifier (its distinct `entity_types()`, BIOES prefix
+  stripped and deduped — NOT the raw `id2label`, which on the PII detector
+  is 161 entries wide for only 40 distinct entities). `weight_hash` is
+  sha256 over the checkpoint's `model.safetensors`, 64 lowercase hex chars
+  — the audit trail this whole daemon exists partly to satisfy (kaish
+  approval-chain rulings).
 - `POST /embed` — TEI-compatible-ish. `{"inputs": "text"}` or
   `{"inputs": ["a", "b"]}`, optional `"kind": "query"|"document"` (default
   `document`; this is the E5-style asymmetric-embedding side selector —
@@ -125,6 +133,39 @@ multiple classifiers, say, needs multiple `lfm2d` processes.
   `--cascade-severe-label` server config, not request fields — see
   `src/lib.rs`'s "cascade configuration is server-side" section for why
   this was a judgment call, not something the spec pinned down explicitly.
+- `POST /v1/spans` — TEI-style, `{"inputs": str | [str]}` plus an OPTIONAL
+  `"model"` (which loaded `--token-classifier-dir` head answers; required
+  as a 400 naming every loaded id when 2+ are loaded, implicit when
+  exactly 1 is) → `[[{"start", "end", "entity", "score"}, ...], ...]`, a
+  bare array of arrays, one span list per input, same TEI-shaped
+  convention as `/embed`/`/predict`. Audit pair travels as `X-Model-Id`/
+  `X-Model-Weight-Hash` headers, same reason.
+  - **`start`/`end` are UTF-8 BYTE offsets, not codepoints/chars, not
+    UTF-16 code units.** A Rust caller (kaibo, the first consumer) can
+    slice `&text[start..end]` directly; a Python/JS caller must re-encode
+    to UTF-8 bytes first — indexing a Python `str` or a JS string with
+    these numbers directly is wrong on any non-ASCII input.
+  - **The matched text is NEVER returned, by design, not as a missing
+    feature** — no `word`/`quote`/`text` field, not even opt-in. The
+    caller already has the text it just sent; echoing a credential back
+    would only create a second copy of it in every log this response
+    passes through. Stricter than GCP DLP on purpose (DLP ships a
+    no-matched-text mode as an option; here it's the only mode).
+  - **`score` is currently a constant `1.0` — not a calibrated
+    confidence.** `candle_lfm2_encoder::Lfm2TokenClassifier`'s public API
+    exposes a BIOES-decoded span (start/end/label) but no per-token
+    logits or softmax probability anywhere, unlike
+    `Lfm2SequenceClassifier::logits`'s sequence-classification
+    counterpart. Producing a real one would mean either duplicating that
+    file's private BIOES-decode + label-ordering logic here (which its
+    own module docs warn is exactly how a 161-wide output gets silently
+    mislabeled) or extending it — out of scope for the change this
+    shipped under (see "Problems noted, not fixed" below). **Do not
+    threshold or rank on this field today.**
+- `POST /v1/spans/credentials` — identical contract to `/v1/spans`, server-
+  side filtered (via `Lfm2TokenClassifier::credentials`) to only the
+  `credential.*` entity family. A separate endpoint, not a query flag on
+  `/v1/spans` — AWS's precedent of shipping "contains PII" as its own API.
 
 Errors: `{"error": {"message", "type"}}`. `type` is `"bad_request"` (400 —
 malformed/empty input, or a call against a head this instance never
@@ -190,7 +231,26 @@ per HTTP request (`method`, `route`, `status`); within it, a `worker_call`
 span carrying `queue_wait_ms` and `inference_ms` — the queue-wait vs.
 compute split is the whole point of a serial worker (see `src/worker.rs`'s
 module docs on how a `tracing::Span` is created request-side and recorded
-onto from the worker OS thread). Resource attributes: `service.name`
+onto from the worker OS thread).
+
+**`/v1/spans`/`/v1/spans/credentials` telemetry is held to a stricter bar.**
+This endpoint exists to find live credentials, so request text contains
+them by definition. No span, log event, or metric anywhere in this crate
+ever records input text, span offsets, or a matched substring — the
+`worker_call` span for these two operations carries only `operation`,
+`queue_wait_ms`, `inference_ms`, and (opt-in) `input_hash`, same as every
+other operation's span, nothing request-shaped added. `--log-input-hash`
+(default OFF) attaches a sha256 hash of the request's input text — never
+the text itself — to that call's span as a trace/log attribute ONLY; it is
+never threaded onto an OTLP METRIC label (unbounded per-input cardinality
+would wreck VictoriaMetrics). `tests/spans_telemetry_safety.rs` is the
+load-bearing proof: it embeds a known secret string in a request, captures
+every field tracing emits via a custom `Layer` (no OTLP collector
+required), and asserts the secret — and the opt-in hash's raw bytes —
+never appear; a mutation test during development (temporarily logging the
+raw input) confirmed this test actually fails when it should.
+
+Resource attributes: `service.name`
 (`OTEL_SERVICE_NAME`, default `lfm2d`), `service.version` (crate version),
 and `lfm2d.model.<kind>_hash` per loaded model — set once, from
 `main.rs`, AFTER models finish loading (weight hashes aren't known any
@@ -252,9 +312,26 @@ The task spec left a few things implicit; here's what was decided and why
    library) — the latter isn't exposed as a separate number in v1, since a
    caller can already derive it from `severity_scores` plus their own
    knowledge of which labels they consider severe.
-4. **One model per head kind.** No request carries a model-selection
-   parameter, so this daemon serves at most one embedder, one classifier,
-   one router at a time.
+4. **One model per head kind — except token classifiers.** No `/predict`/
+   `/v1/classify`/`/v1/route` request carries a model-selection parameter,
+   so this daemon serves at most one embedder, one classifier, one router
+   at a time. `/v1/spans`/`/v1/spans/credentials` are the deliberate
+   exception: `--token-classifier-dir` is repeatable and the request takes
+   an optional `"model"` field, because "N secrets/PII detectors behind one
+   sidecar" (a general PII head plus a narrower secrets-only head, say) is
+   a realistic deployment shape in a way that "N embedders" or "N routers"
+   is not for this daemon's current consumers.
+5. **`/v1/spans`'s `score` field is a known-incomplete placeholder, not a
+   silently-wrong one.** See the API section's `/v1/spans` entry above and
+   `types::SpanResult::score`'s doc comment for the full reasoning: the
+   library's public `Lfm2TokenClassifier` surface has no per-token
+   probability to build a real confidence from, and reconstructing one
+   outside the library (by re-deriving its private BIOES decode / label
+   ordering) is exactly the class of bug that file's own module docs warn
+   against. Flagged to Amy rather than guessed at or silently shipped —
+   the fix is a small, additive library method
+   (`Lfm2TokenClassifier::token_probs` alongside the existing
+   `token_label_ids`), not an `lfm2d` change.
 
 ## Problems noted, not fixed (scope-limited by the task)
 
@@ -294,3 +371,21 @@ The task spec left a few things implicit; here's what was decided and why
   decision logic (`worker_thread_outcome_is_a_crash`) is ALSO unit-tested
   directly, so the crash-vs-clean-exit distinction has a fast, model-free
   test in addition to the slower real-binary one.
+- **`/v1/spans`'s `score` is a constant `1.0`, not a real confidence** —
+  see "Judgment calls worth knowing about" item 5 above. Do not build a
+  consumer that thresholds or ranks on this field until it's backed by a
+  real per-token probability.
+- **`lfm2d.model.token_classifier_hash` collides across 2+ token
+  classifiers.** `telemetry::resource()` sets one OTLP resource attribute
+  per LOADED KIND (`lfm2d.model.<kind>_hash`), a scheme that predates
+  `--token-classifier-dir` being repeatable — with 2+ token classifiers
+  loaded, only the last one's hash survives in that attribute (the others
+  are silently overwritten by `Resource::builder().with_attribute`'s
+  last-write-wins semantics). Every loaded model's real hash is still
+  correctly reported per-model in `GET /v1/models` and in every
+  `/v1/spans` response's `X-Model-Weight-Hash` header — this only affects
+  the OTLP resource-attribute shortcut, not the audit trail itself. Worth
+  fixing (e.g. `lfm2d.model.token_classifier.<id>_hash` per head) before
+  anyone relies on that specific attribute with 2+ token classifiers
+  loaded; not fixed here because it needed a resource-attribute shape
+  decision, not a spans-endpoint one.

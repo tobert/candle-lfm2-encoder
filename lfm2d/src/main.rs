@@ -94,8 +94,10 @@ async fn main() {
         embedder_dir = ?cli.embedder_dir,
         classifier_dir = ?cli.classifier_dir,
         router_dir = ?cli.router_dir,
+        token_classifier_dir = ?cli.token_classifier_dir,
         cascade_routes = ?cli.cascade_routes,
         cascade_severe_labels = ?cli.cascade_severe_labels,
+        log_input_hash = cli.log_input_hash,
         socket_path = ?cli.socket_path,
         bind_addr = ?cli.bind_addr,
         threads,
@@ -119,7 +121,7 @@ async fn main() {
         "lfm2d: startup observability"
     );
 
-    let worker = WorkerHandle::spawn_crash_on_panic(engine);
+    let worker = WorkerHandle::spawn_crash_on_panic(engine).with_log_input_hash(cli.log_input_hash);
     let _queue_depth_gauge = lfm2d::telemetry::register_queue_depth_gauge(worker.queue_depth_handle());
 
     // Loading (above) is synchronous and already complete by the time we

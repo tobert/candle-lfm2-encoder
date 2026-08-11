@@ -13,9 +13,9 @@
 
 use crate::types::{
     CascadeClause, CascadeLane, CascadeModelRef, CascadeResponse, CascadeWinner, ClassifyResult,
-    EmbedKind, LabelScore, ModelInfo, ModelKind, RouteResponse, RouteScore,
+    EmbedKind, LabelScore, ModelInfo, ModelKind, RouteResponse, RouteScore, SpanResult,
 };
-use crate::worker::{EmbedOutcome, InferenceEngine, PredictOutcome, WorkerError};
+use crate::worker::{EmbedOutcome, InferenceEngine, PredictOutcome, SpansOutcome, WorkerError};
 
 /// A fake loaded model's identity — same shape as what a real load would
 /// record, without ever touching a file.
@@ -40,6 +40,37 @@ impl StubModel {
     }
 }
 
+/// A fake loaded token-classification head — same shape as what
+/// `RealEngine` records per `--token-classifier-dir` entry
+/// ([`crate::engine_real::ModelMeta`] + its `entity_types()`), without ever
+/// touching a checkpoint.
+#[derive(Debug, Clone)]
+pub struct StubTokenClassifier {
+    pub model: StubModel,
+    /// BIOES-prefix-stripped entity type names — what `GET /v1/models`
+    /// reports as `labels` for this head, and what `/v1/spans`'
+    /// fake-but-deterministic decode below picks entities from.
+    pub entity_types: Vec<String>,
+}
+
+impl StubTokenClassifier {
+    /// The PII detector's shape at a glance: a handful of representative
+    /// entity types spanning both a `credential.*` type (so
+    /// `/v1/spans/credentials` tests have something to filter down to) and
+    /// a non-credential type (so filtering is actually exercised, not
+    /// vacuously true).
+    pub fn new(id: impl Into<String>) -> Self {
+        Self {
+            model: StubModel::new(id),
+            entity_types: vec![
+                "credential.api_key".to_string(),
+                "person.name".to_string(),
+                "location.address".to_string(),
+            ],
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct StubEngine {
     pub embedder: Option<StubModel>,
@@ -49,6 +80,11 @@ pub struct StubEngine {
     /// [`candle_lfm2_encoder::Lfm2SequenceClassifier::labels`].
     pub classifier_labels: Vec<String>,
     pub router: Option<StubModel>,
+    /// Zero, one, or many loaded token-classification heads — mirrors
+    /// `--token-classifier-dir` being repeatable. Tests exercise both the
+    /// "exactly 1, implicit" and "2+, `model` required" selection rules
+    /// against this directly (see `router_stub.rs`'s `/v1/spans` tests).
+    pub token_classifiers: Vec<StubTokenClassifier>,
     /// Server-side cascade config — see the crate root docs on why this is
     /// not per-request.
     pub cascade_routes: Vec<String>,
@@ -84,12 +120,70 @@ impl StubEngine {
             classifier: Some(StubModel::new("stub-classifier")),
             classifier_labels: vec!["destructive".into(), "informative".into(), "mutating".into()],
             router: Some(StubModel::new("stub-router")),
+            // Deliberately empty: `v1_models_lists_every_configured_head_with_hash_and_kind`
+            // asserts `models.len() == 3` against this exact configuration.
+            // Tests that want a token classifier build a `StubEngine`
+            // directly (same pattern `v1_models_reflects_a_partially_configured_server`
+            // already uses for "only-router").
+            token_classifiers: Vec::new(),
             cascade_routes: vec!["shell".into(), "k8s".into()],
             cascade_severe_labels: vec!["mutating".into(), "destructive".into()],
             fail_with: None,
             panic_with: None,
             delay: None,
         }
+    }
+
+    /// Resolve which loaded token-classification head answers a
+    /// `/v1/spans`/`/v1/spans/credentials` call — mirrors
+    /// `engine_real::RealEngine::resolve_token_classifier` exactly (same
+    /// rule, same error wording shape) so a router test genuinely exercises
+    /// the disambiguation logic, not a stub-only approximation of it.
+    fn resolve_token_classifier(&self, model: Option<&str>) -> Result<&StubTokenClassifier, WorkerError> {
+        if self.token_classifiers.is_empty() {
+            return Err(WorkerError::BadRequest(
+                "no token classifier configured on this server (--token-classifier-dir)".to_string(),
+            ));
+        }
+        if let Some(name) = model {
+            return self
+                .token_classifiers
+                .iter()
+                .find(|c| c.model.id == name)
+                .ok_or_else(|| {
+                    let available: Vec<&str> = self.token_classifiers.iter().map(|c| c.model.id.as_str()).collect();
+                    WorkerError::BadRequest(format!(
+                        "no token classifier named {name:?} on this server; loaded: {available:?}"
+                    ))
+                });
+        }
+        if self.token_classifiers.len() == 1 {
+            return Ok(&self.token_classifiers[0]);
+        }
+        let available: Vec<&str> = self.token_classifiers.iter().map(|c| c.model.id.as_str()).collect();
+        Err(WorkerError::BadRequest(format!(
+            "2+ token classifiers are loaded ({available:?}) — a \"model\" field naming one is required"
+        )))
+    }
+
+    /// Deterministic, obviously-fake spans: one span per input, covering
+    /// the whole (trimmed) text, whose entity type and score both vary with
+    /// `text.len()` — enough spread for tests to assert something specific
+    /// without needing real inference. NOT meant to resemble a real BIOES
+    /// decode; `RealEngine`'s tests (`integration_real.rs`) cover that.
+    fn fake_spans(&self, clf: &StubTokenClassifier, text: &str) -> Vec<SpanResult> {
+        let trimmed_len = text.trim().len();
+        if trimmed_len == 0 {
+            return Vec::new();
+        }
+        let start = text.len() - text.trim_start().len();
+        let n = clf.entity_types.len().max(1);
+        let entity = clf.entity_types[text.len() % n].clone();
+        // Deterministic pseudo-score in [0.5, 1.0) — enough range that a
+        // test can assert two different inputs produce different scores
+        // without claiming to model real confidence.
+        let score = 0.5 + (text.len() % 50) as f32 / 100.0;
+        vec![SpanResult { start, end: start + trimmed_len, entity, score }]
     }
 
     fn check_fail(&self) -> Result<(), WorkerError> {
@@ -146,6 +240,15 @@ impl InferenceEngine for StubEngine {
                 weight_hash: m.weight_hash.clone(),
                 labels: None,
                 hidden_size: m.hidden_size,
+            });
+        }
+        for clf in &self.token_classifiers {
+            out.push(ModelInfo {
+                id: clf.model.id.clone(),
+                kind: ModelKind::TokenClassifier,
+                weight_hash: clf.model.weight_hash.clone(),
+                labels: Some(clf.entity_types.clone()),
+                hidden_size: clf.model.hidden_size,
             });
         }
         out
@@ -314,5 +417,22 @@ impl InferenceEngine for StubEngine {
                 CascadeModelRef { model_id: router.id.clone(), weight_hash: router.weight_hash.clone() },
             ],
         })
+    }
+
+    fn spans(&self, inputs: &[String], model: Option<&str>) -> Result<SpansOutcome, WorkerError> {
+        self.check_fail()?;
+        let clf = self.resolve_token_classifier(model)?;
+        let per_input = inputs.iter().map(|text| self.fake_spans(clf, text)).collect();
+        Ok(SpansOutcome { per_input, model_id: clf.model.id.clone(), weight_hash: clf.model.weight_hash.clone() })
+    }
+
+    fn spans_credentials(&self, inputs: &[String], model: Option<&str>) -> Result<SpansOutcome, WorkerError> {
+        self.check_fail()?;
+        let clf = self.resolve_token_classifier(model)?;
+        let per_input = inputs
+            .iter()
+            .map(|text| self.fake_spans(clf, text).into_iter().filter(|s| s.entity.starts_with("credential.")).collect())
+            .collect();
+        Ok(SpansOutcome { per_input, model_id: clf.model.id.clone(), weight_hash: clf.model.weight_hash.clone() })
     }
 }

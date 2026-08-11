@@ -20,16 +20,16 @@ use std::path::Path;
 
 use candle_lfm2_encoder::{
     resolve_severe_labels, Cascade, Lfm2Embedding, Lfm2EncoderConfig, Lfm2SequenceClassifier,
-    Lfm2SequenceRouter, TextKind,
+    Lfm2SequenceRouter, Lfm2TokenClassifier, TextKind,
 };
 
 use crate::config::Cli;
 use crate::hash::sha256_hex_file;
 use crate::types::{
     CascadeClause, CascadeLane, CascadeModelRef, CascadeResponse, CascadeWinner, ClassifyResult,
-    EmbedKind, LabelScore, ModelInfo, ModelKind, RouteResponse, RouteScore,
+    EmbedKind, LabelScore, ModelInfo, ModelKind, RouteResponse, RouteScore, SpanResult,
 };
-use crate::worker::{EmbedOutcome, InferenceEngine, PredictOutcome, WorkerError};
+use crate::worker::{EmbedOutcome, InferenceEngine, PredictOutcome, SpansOutcome, WorkerError};
 
 /// A loaded checkpoint's audit identity, computed once at load time.
 #[derive(Debug, Clone)]
@@ -72,6 +72,13 @@ pub struct RealEngine {
     embedder: Option<(Lfm2Embedding, ModelMeta)>,
     classifier: Option<(Lfm2SequenceClassifier, ModelMeta)>,
     router: Option<(Lfm2SequenceRouter, ModelMeta)>,
+    /// Zero, one, or many — mirrors `--token-classifier-dir` being
+    /// repeatable, unlike every other head. Order is load order (the
+    /// `--token-classifier-dir` flags' order), which is also the order
+    /// `list_models` reports them in; `/v1/spans`'s `"model"` selection
+    /// looks these up BY ID, never by position, so load order has no
+    /// observable effect beyond that listing order.
+    token_classifiers: Vec<(Lfm2TokenClassifier, ModelMeta)>,
     cascade_routes: Vec<String>,
     cascade_severe_labels: Vec<String>,
 }
@@ -118,6 +125,38 @@ impl RealEngine {
             None => None,
         };
 
+        // Load every `--token-classifier-dir` in order. Same fail-first
+        // discipline as every other head above — a bad checkpoint in the
+        // Nth directory must not start a server that only serves the first
+        // N-1.
+        let mut token_classifiers = Vec::with_capacity(cli.token_classifier_dir.len());
+        for dir in &cli.token_classifier_dir {
+            let model = Lfm2TokenClassifier::from_dir(dir)
+                .map_err(|e| format!("loading token classifier at {}: {e}", dir.display()))?;
+            let meta = load_meta(dir)?;
+            token_classifiers.push((model, meta));
+        }
+        // Two directories with the same basename would load fine
+        // individually but make `/v1/spans`'s `"model"` selection silently
+        // ambiguous — the SECOND one loaded would just never be reachable
+        // by name (or worse, ordering-dependent behavior if the lookup were
+        // ever changed to "first match"). Fail loudly at startup instead,
+        // while the operator can still fix the deploy config, rather than
+        // lazily on whichever request happens to name the shadowed id.
+        {
+            let mut seen: Vec<&str> = Vec::with_capacity(token_classifiers.len());
+            for (_, meta) in &token_classifiers {
+                if seen.contains(&meta.id.as_str()) {
+                    return Err(format!(
+                        "two --token-classifier-dir entries resolve to the same model id {:?} \
+                         (directory basenames must be unique across all loaded token classifiers)",
+                        meta.id
+                    ));
+                }
+                seen.push(&meta.id);
+            }
+        }
+
         if !cli.cascade_routes.is_empty() {
             let (classifier_model, _) = classifier.as_ref().ok_or_else(|| {
                 "--cascade-route was given but no --classifier-dir was configured: \
@@ -139,10 +178,54 @@ impl RealEngine {
             embedder,
             classifier,
             router,
+            token_classifiers,
             cascade_routes: cli.cascade_routes.clone(),
             cascade_severe_labels: cli.cascade_severe_labels.clone(),
         })
     }
+
+    /// Resolve which loaded token-classification head answers a
+    /// `/v1/spans`/`/v1/spans/credentials` call. `model: Some(name)` always
+    /// looks up by id (a caller-named id that doesn't exist is a 400 naming
+    /// every loaded id, even when only one head is loaded — silently
+    /// falling back to "the one head" on a mistyped name would be exactly
+    /// the kind of silent-fallback this crate's house rule forbids).
+    /// `model: None` is only valid when exactly one head is loaded; with
+    /// 2+, it's a 400 naming every loaded id — see the crate root docs' "N
+    /// token heads" section.
+    fn resolve_token_classifier(&self, model: Option<&str>) -> Result<&(Lfm2TokenClassifier, ModelMeta), WorkerError> {
+        if self.token_classifiers.is_empty() {
+            return Err(WorkerError::BadRequest(
+                "no token classifier configured on this server (--token-classifier-dir)".to_string(),
+            ));
+        }
+        if let Some(name) = model {
+            return self.token_classifiers.iter().find(|(_, meta)| meta.id == name).ok_or_else(|| {
+                let available: Vec<&str> = self.token_classifiers.iter().map(|(_, m)| m.id.as_str()).collect();
+                WorkerError::BadRequest(format!(
+                    "no token classifier named {name:?} on this server; loaded: {available:?}"
+                ))
+            });
+        }
+        if self.token_classifiers.len() == 1 {
+            return Ok(&self.token_classifiers[0]);
+        }
+        let available: Vec<&str> = self.token_classifiers.iter().map(|(_, m)| m.id.as_str()).collect();
+        Err(WorkerError::BadRequest(format!(
+            "2+ token classifiers are loaded ({available:?}) — a \"model\" field naming one is required"
+        )))
+    }
+}
+
+/// [`candle_lfm2_encoder::Span`] → the wire [`SpanResult`]: byte offsets and
+/// label unchanged, and `score` straight through from the library.
+///
+/// That score is the MINIMUM softmax confidence over the span's tokens, not
+/// a mean — see [`candle_lfm2_encoder::Span::score`]. It reads lower than
+/// the equivalent number from tools that average; that is deliberate and
+/// must not be "corrected" here.
+fn to_wire_span(span: candle_lfm2_encoder::Span) -> SpanResult {
+    SpanResult { start: span.start, end: span.end, entity: span.label, score: span.score }
 }
 
 /// Build the full per-label score map plus the argmax `(label, score)` in
@@ -188,6 +271,15 @@ impl InferenceEngine for RealEngine {
                 kind: ModelKind::Router,
                 weight_hash: meta.weight_hash.clone(),
                 labels: None,
+                hidden_size: meta.hidden_size,
+            });
+        }
+        for (model, meta) in &self.token_classifiers {
+            out.push(ModelInfo {
+                id: meta.id.clone(),
+                kind: ModelKind::TokenClassifier,
+                weight_hash: meta.weight_hash.clone(),
+                labels: Some(model.entity_types().into_iter().map(str::to_string).collect()),
                 hidden_size: meta.hidden_size,
             });
         }
@@ -305,5 +397,23 @@ impl InferenceEngine for RealEngine {
                 CascadeModelRef { model_id: router_meta.id.clone(), weight_hash: router_meta.weight_hash.clone() },
             ],
         })
+    }
+
+    fn spans(&self, inputs: &[String], model: Option<&str>) -> Result<SpansOutcome, WorkerError> {
+        let (clf, meta) = self.resolve_token_classifier(model)?;
+        let per_input = inputs
+            .iter()
+            .map(|text| Ok(clf.predict(text).map_err(WorkerError::from)?.into_iter().map(to_wire_span).collect()))
+            .collect::<Result<Vec<_>, WorkerError>>()?;
+        Ok(SpansOutcome { per_input, model_id: meta.id.clone(), weight_hash: meta.weight_hash.clone() })
+    }
+
+    fn spans_credentials(&self, inputs: &[String], model: Option<&str>) -> Result<SpansOutcome, WorkerError> {
+        let (clf, meta) = self.resolve_token_classifier(model)?;
+        let per_input = inputs
+            .iter()
+            .map(|text| Ok(clf.credentials(text).map_err(WorkerError::from)?.into_iter().map(to_wire_span).collect()))
+            .collect::<Result<Vec<_>, WorkerError>>()?;
+        Ok(SpansOutcome { per_input, model_id: meta.id.clone(), weight_hash: meta.weight_hash.clone() })
     }
 }

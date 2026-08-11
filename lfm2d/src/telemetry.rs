@@ -70,6 +70,7 @@ fn model_kind_attr(kind: ModelKind) -> &'static str {
         ModelKind::Embedder => "embedder",
         ModelKind::Classifier => "classifier",
         ModelKind::Router => "router",
+        ModelKind::TokenClassifier => "token_classifier",
     }
 }
 

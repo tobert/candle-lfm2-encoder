@@ -15,7 +15,7 @@ use std::collections::BTreeMap;
 use lfm2d::types::{
     ApiError, CascadeClause, CascadeLane, CascadeModelRef, CascadeRequest, CascadeResponse,
     CascadeWinner, ClassifyRequest, ClassifyResult, EmbedRequest, Inputs, LabelScore, ModelInfo,
-    ModelKind, PredictRequest, RouteRequest, RouteResponse, RouteScore,
+    ModelKind, PredictRequest, RouteRequest, RouteResponse, RouteScore, SpanResult, SpansRequest,
 };
 
 fn assert_json_eq<T: serde::Serialize>(value: &T, expected: &str) {
@@ -289,6 +289,79 @@ fn cascade_response_matches_the_moderations_flavored_contract_exactly() {
 
     assert_eq!(v["models"][0]["model_id"], "kube_ordinal_v6");
     assert_eq!(v["models"][1]["model_id"], "LFM2.5-Encoder-350M-Prompt-Router");
+}
+
+// -------------------------------------------------------------- /v1/spans
+
+#[test]
+fn spans_request_accepts_a_single_string_with_no_model_field() {
+    let req: SpansRequest = serde_json::from_str(r#"{"inputs": "hello"}"#).expect("parse");
+    assert_eq!(req.inputs.into_vec(), vec!["hello".to_string()]);
+    assert_eq!(req.model, None);
+}
+
+#[test]
+fn spans_request_accepts_a_batch_plus_an_explicit_model() {
+    let req: SpansRequest =
+        serde_json::from_str(r#"{"inputs": ["a", "b"], "model": "LFM2.5-Encoder-350M-PII-Detector"}"#)
+            .expect("parse");
+    assert_eq!(req.inputs.into_vec(), vec!["a".to_string(), "b".to_string()]);
+    assert_eq!(req.model.as_deref(), Some("LFM2.5-Encoder-350M-PII-Detector"));
+}
+
+#[test]
+fn span_result_pins_start_end_entity_score_and_nothing_else() {
+    let span = SpanResult { start: 5, end: 12, entity: "credential.api_key".to_string(), score: 0.93 };
+    let v = serde_json::to_value(&span).unwrap();
+    let obj = v.as_object().expect("SpanResult must serialize as an object");
+
+    // Exactly these four keys — this is the load-bearing assertion for the
+    // "never return the matched text" rule: a `word`/`quote`/`text` field
+    // added later (even behind a default-off flag that happened to be on
+    // here) would fail this the instant it existed.
+    let mut keys: Vec<&str> = obj.keys().map(String::as_str).collect();
+    keys.sort_unstable();
+    assert_eq!(keys, vec!["end", "entity", "score", "start"]);
+
+    assert_eq!(v["start"], 5);
+    assert_eq!(v["end"], 12);
+    assert_eq!(v["entity"], "credential.api_key");
+    assert!((v["score"].as_f64().unwrap() - 0.93).abs() < 1e-5);
+}
+
+#[test]
+fn spans_response_shape_is_a_bare_array_of_span_lists() {
+    // No wrapper object — TEI-ish, matching /embed and /predict: a bare
+    // Vec<Vec<SpanResult>>, one inner list per input.
+    let resp: Vec<Vec<SpanResult>> = vec![
+        vec![SpanResult { start: 0, end: 3, entity: "person.name".to_string(), score: 0.8 }],
+        vec![],
+    ];
+    let v = serde_json::to_value(&resp).unwrap();
+    assert!(v.is_array());
+    assert_eq!(v.as_array().unwrap().len(), 2, "one entry per input, including inputs with zero spans");
+    assert_eq!(v[1].as_array().unwrap().len(), 0);
+}
+
+// ------------------------------------------------------------- /v1/models
+
+#[test]
+fn model_kind_token_classifier_serializes_as_snake_case() {
+    assert_json_eq(&ModelKind::TokenClassifier, r#""token_classifier""#);
+}
+
+#[test]
+fn model_info_for_a_token_classifier_carries_entity_types_as_labels() {
+    let info = ModelInfo {
+        id: "LFM2.5-Encoder-350M-PII-Detector".to_string(),
+        kind: ModelKind::TokenClassifier,
+        weight_hash: "a".repeat(64),
+        labels: Some(vec!["credential.api_key".into(), "person.name".into()]),
+        hidden_size: 1024,
+    };
+    let v = serde_json::to_value(&info).unwrap();
+    assert_eq!(v["kind"], "token_classifier");
+    assert_eq!(v["labels"], serde_json::json!(["credential.api_key", "person.name"]));
 }
 
 // ----------------------------------------------------------------- errors

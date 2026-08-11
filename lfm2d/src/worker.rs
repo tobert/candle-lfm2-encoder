@@ -49,7 +49,9 @@ use std::time::Instant;
 use tokio::sync::oneshot;
 use tracing::Span;
 
-use crate::types::{CascadeResponse, ClassifyResult, EmbedKind, LabelScore, ModelInfo, RouteResponse};
+use crate::types::{
+    CascadeResponse, ClassifyResult, EmbedKind, LabelScore, ModelInfo, RouteResponse, SpanResult,
+};
 
 /// A worker-side failure, already classified into the two HTTP status
 /// families the API contract promises: a caller-supplied problem (400) or
@@ -109,6 +111,17 @@ pub struct PredictOutcome {
     pub weight_hash: String,
 }
 
+/// As [`EmbedOutcome`], for `/v1/spans` and `/v1/spans/credentials` — the
+/// same outcome shape backs both, since "credentials" is just `spans`
+/// filtered server-side to the `credential.*` family (see
+/// [`InferenceEngine::spans_credentials`]).
+#[derive(Debug, Clone)]
+pub struct SpansOutcome {
+    pub per_input: Vec<Vec<SpanResult>>,
+    pub model_id: String,
+    pub weight_hash: String,
+}
+
 /// The engine seam. Every method is synchronous (candle inference is
 /// CPU-bound, blocking work — there is nothing to `.await` inside it) and
 /// runs entirely on the worker thread; `&self` because a loaded model is
@@ -120,6 +133,14 @@ pub trait InferenceEngine: Send + 'static {
     fn classify(&self, inputs: &[String]) -> Result<Vec<ClassifyResult>, WorkerError>;
     fn route(&self, input: &str, routes: &[String]) -> Result<RouteResponse, WorkerError>;
     fn cascade(&self, clauses: &[String]) -> Result<CascadeResponse, WorkerError>;
+    /// `model` selects which loaded `--token-classifier-dir` head answers
+    /// this call — required (as a 400 naming the loaded ids) when 2+ are
+    /// loaded, optional (falls back to "the one loaded head") when exactly
+    /// 1 is loaded, and always a 400 if it names an id nothing loaded.
+    fn spans(&self, inputs: &[String], model: Option<&str>) -> Result<SpansOutcome, WorkerError>;
+    /// As [`Self::spans`], filtered to the `credential.*` entity family —
+    /// see `candle_lfm2_encoder::Lfm2TokenClassifier::credentials`.
+    fn spans_credentials(&self, inputs: &[String], model: Option<&str>) -> Result<SpansOutcome, WorkerError>;
 }
 
 /// Metadata every [`WorkerCommand`] variant carries alongside its
@@ -166,6 +187,18 @@ pub(crate) enum WorkerCommand {
         reply: oneshot::Sender<Result<CascadeResponse, WorkerError>>,
         meta: Enqueued,
     },
+    Spans {
+        inputs: Vec<String>,
+        model: Option<String>,
+        reply: oneshot::Sender<Result<SpansOutcome, WorkerError>>,
+        meta: Enqueued,
+    },
+    SpansCredentials {
+        inputs: Vec<String>,
+        model: Option<String>,
+        reply: oneshot::Sender<Result<SpansOutcome, WorkerError>>,
+        meta: Enqueued,
+    },
 }
 
 /// A cheap-to-clone handle to the worker thread. Every axum handler holds
@@ -181,6 +214,14 @@ pub struct WorkerHandle {
     /// `telemetry::register_queue_depth_gauge`). Incremented in
     /// [`Self::send`], decremented at the top of the worker loop's match.
     queue_depth: Arc<AtomicUsize>,
+    /// `--log-input-hash` (default `false`): attach a hash of the request's
+    /// input TEXT (never the text itself) to the `worker_call` span for
+    /// [`Self::spans`]/[`Self::spans_credentials`] ONLY — see
+    /// [`Self::with_log_input_hash`] and the module docs' "Observability"
+    /// section. Never threaded into any OTLP METRIC attribute (unbounded
+    /// per-input cardinality would wreck VictoriaMetrics) — trace/log
+    /// attribute only.
+    log_input_hash: bool,
 }
 
 /// A single dispatch point every `WorkerCommand::Foo { .. }` variant's
@@ -280,6 +321,16 @@ impl WorkerHandle {
                                 engine.cascade(&clauses)
                             }));
                         }
+                        WorkerCommand::Spans { inputs, model, reply, meta } => {
+                            let _ = reply.send(run_timed(meta, &worker_queue_depth, "spans", || {
+                                engine.spans(&inputs, model.as_deref())
+                            }));
+                        }
+                        WorkerCommand::SpansCredentials { inputs, model, reply, meta } => {
+                            let _ = reply.send(run_timed(meta, &worker_queue_depth, "spans_credentials", || {
+                                engine.spans_credentials(&inputs, model.as_deref())
+                            }));
+                        }
                     }
                 }
             })
@@ -307,7 +358,17 @@ impl WorkerHandle {
                 .expect("failed to spawn the lfm2d worker crash monitor thread");
         }
 
-        Self { tx, queue_depth }
+        Self { tx, queue_depth, log_input_hash: false }
+    }
+
+    /// Opt into attaching an input-text hash to `/v1/spans`/
+    /// `/v1/spans/credentials` trace spans (`--log-input-hash`, default
+    /// off) — see [`Self::log_input_hash`]'s doc comment. Consumed builder-
+    /// style so the common case (every existing call site: `WorkerHandle::
+    /// spawn(engine)` with no chained call) needs no change at all.
+    pub fn with_log_input_hash(mut self, enabled: bool) -> Self {
+        self.log_input_hash = enabled;
+        self
     }
 
     /// Clone of the queue-depth counter — `main.rs` passes this to
@@ -374,6 +435,66 @@ impl WorkerHandle {
         let span = tracing::info_span!("worker_call", operation = "cascade", queue_wait_ms = tracing::field::Empty, inference_ms = tracing::field::Empty);
         let (tx, rx) = oneshot::channel();
         self.send(WorkerCommand::Cascade { clauses, reply: tx, meta: Enqueued { queued_at: Instant::now(), span } })?;
+        Self::recv(rx).await?
+    }
+
+    /// Hash `inputs` for the `input_hash` span field, iff `--log-input-hash`
+    /// is enabled — computed here (request-side, before the command is even
+    /// built) rather than on the worker thread, since it needs the caller's
+    /// text and NOTHING downstream of this point is allowed to see that
+    /// text in any form that could be logged (see [`Self::spans`]/
+    /// [`Self::spans_credentials`]). Joins the batch with a control byte no
+    /// legal input text can itself contain, so `["ab", "c"]` and `["a",
+    /// "bc"]` hash differently — correctness the caller may care about even
+    /// though this value's only sanctioned use is human correlation, never
+    /// a lookup key.
+    fn input_hash(&self, inputs: &[String]) -> Option<String> {
+        self.log_input_hash.then(|| {
+            let joined = inputs.join("\u{1}");
+            crate::hash::sha256_hex_bytes(joined.as_bytes())
+        })
+    }
+
+    /// `POST /v1/spans` — see [`InferenceEngine::spans`]. The
+    /// `worker_call` span here NEVER carries the input text, any span
+    /// offset, or any matched substring — see the module docs'
+    /// "Observability" section and `crate::types::SpanResult`'s doc
+    /// comment for why that's a hard rule on this endpoint specifically:
+    /// request text contains live credentials by definition. `input_hash`
+    /// is the ONE opt-in exception, gated on `--log-input-hash`
+    /// (default off) and attached as a trace/log field only — never a
+    /// metric label.
+    pub async fn spans(&self, inputs: Vec<String>, model: Option<String>) -> Result<SpansOutcome, WorkerError> {
+        let span = tracing::info_span!(
+            "worker_call",
+            operation = "spans",
+            queue_wait_ms = tracing::field::Empty,
+            inference_ms = tracing::field::Empty,
+            input_hash = tracing::field::Empty,
+        );
+        if let Some(hash) = self.input_hash(&inputs) {
+            span.record("input_hash", hash.as_str());
+        }
+        let (tx, rx) = oneshot::channel();
+        self.send(WorkerCommand::Spans { inputs, model, reply: tx, meta: Enqueued { queued_at: Instant::now(), span } })?;
+        Self::recv(rx).await?
+    }
+
+    /// `POST /v1/spans/credentials` — as [`Self::spans`], with the same
+    /// no-text/no-offsets telemetry rule.
+    pub async fn spans_credentials(&self, inputs: Vec<String>, model: Option<String>) -> Result<SpansOutcome, WorkerError> {
+        let span = tracing::info_span!(
+            "worker_call",
+            operation = "spans_credentials",
+            queue_wait_ms = tracing::field::Empty,
+            inference_ms = tracing::field::Empty,
+            input_hash = tracing::field::Empty,
+        );
+        if let Some(hash) = self.input_hash(&inputs) {
+            span.record("input_hash", hash.as_str());
+        }
+        let (tx, rx) = oneshot::channel();
+        self.send(WorkerCommand::SpansCredentials { inputs, model, reply: tx, meta: Enqueued { queued_at: Instant::now(), span } })?;
         Self::recv(rx).await?
     }
 }

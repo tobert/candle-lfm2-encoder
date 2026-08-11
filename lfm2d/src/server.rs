@@ -20,7 +20,7 @@ use tracing::Instrument as _;
 use crate::shutdown::{ShutdownHandle, ShutdownSignal};
 use crate::types::{
     ApiError, CascadeRequest, CascadeResponse, ClassifyRequest, ClassifyResult, EmbedRequest,
-    ModelInfo, PredictRequest, RouteRequest, RouteResponse,
+    ModelInfo, PredictRequest, RouteRequest, RouteResponse, SpansRequest,
 };
 use crate::worker::{WorkerError, WorkerHandle};
 
@@ -50,6 +50,8 @@ pub fn build_router(state: AppState) -> Router {
         .route("/v1/classify", post(classify))
         .route("/v1/route", post(route))
         .route("/v1/cascade", post(cascade))
+        .route("/v1/spans", post(spans))
+        .route("/v1/spans/credentials", post(spans_credentials))
         .with_state(Arc::new(state))
         .layer(axum::middleware::from_fn(telemetry_middleware))
 }
@@ -281,6 +283,56 @@ async fn cascade(
         return Err(bad_request("clauses must not be empty"));
     }
     state.worker.cascade(req.clauses).await.map(Json).map_err(map_worker_error)
+}
+
+/// `POST /v1/spans` — TEI-style `{"inputs": ...}`, optional `"model"` to
+/// pick a loaded token-classification head → `[[{"start","end","entity",
+/// "score"}, ...], ...]`, one span list per input, BARE array-of-arrays
+/// (no wrapper object) same as `/embed`/`/predict`. Audit pair travels as
+/// `X-Model-Id`/`X-Model-Weight-Hash` headers, same convention, same
+/// reason (see the crate root docs' "two response conventions").
+///
+/// Model selection: with 2+ `--token-classifier-dir` heads loaded and no
+/// `"model"` field, [`WorkerHandle::spans`] → [`crate::engine_real::RealEngine`]
+/// returns a 400 that NAMES every loaded id — never a silent "pick the
+/// first one" default. With exactly one head loaded, `"model"` is
+/// optional.
+///
+/// **Never returns the matched text** — see [`crate::types::SpanResult`]'s
+/// doc comment for why that's a hard rule on this endpoint, not a missing
+/// feature.
+async fn spans(
+    State(state): State<Arc<AppState>>,
+    ValidJson(req): ValidJson<SpansRequest>,
+) -> Result<Response, ApiErrorResponse> {
+    let inputs = req.inputs.into_vec();
+    if inputs.is_empty() {
+        return Err(bad_request("inputs must not be empty"));
+    }
+    let outcome = state.worker.spans(inputs, req.model).await.map_err(map_worker_error)?;
+    let mut resp = Json(outcome.per_input).into_response();
+    attach_audit_headers(&mut resp, &outcome.model_id, &outcome.weight_hash);
+    Ok(resp)
+}
+
+/// `POST /v1/spans/credentials` — as [`spans`], filtered server-side (via
+/// `candle_lfm2_encoder::Lfm2TokenClassifier::credentials`) to ONLY the
+/// `credential.*` entity family. A separate endpoint rather than a
+/// `/v1/spans?credentials_only=true`-style flag — AWS's precedent of
+/// shipping "contains PII" as its own API, not a parameter on the general
+/// one, per the crate root docs.
+async fn spans_credentials(
+    State(state): State<Arc<AppState>>,
+    ValidJson(req): ValidJson<SpansRequest>,
+) -> Result<Response, ApiErrorResponse> {
+    let inputs = req.inputs.into_vec();
+    if inputs.is_empty() {
+        return Err(bad_request("inputs must not be empty"));
+    }
+    let outcome = state.worker.spans_credentials(inputs, req.model).await.map_err(map_worker_error)?;
+    let mut resp = Json(outcome.per_input).into_response();
+    attach_audit_headers(&mut resp, &outcome.model_id, &outcome.weight_hash);
+    Ok(resp)
 }
 
 // ----------------------------------------------------------------- serve

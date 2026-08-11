@@ -15,10 +15,20 @@ use sha2::{Digest, Sha256};
 /// candle uses for the tensors themselves.
 pub fn sha256_hex_file(path: impl AsRef<Path>) -> std::io::Result<String> {
     let bytes = std::fs::read(path.as_ref())?;
+    Ok(sha256_hex_bytes(&bytes))
+}
+
+/// sha256 of `bytes`, as 64 lowercase hex characters. Used for the checkpoint
+/// weight-hash audit trail ([`sha256_hex_file`]) AND, separately, for the
+/// optional `--log-input-hash` trace attribute on `/v1/spans` requests (see
+/// `worker.rs`'s `spans`/`spans_credentials` methods) — the same primitive,
+/// two different inputs (a file's bytes vs. a request's input text), so it's
+/// factored out once rather than duplicated.
+pub fn sha256_hex_bytes(bytes: &[u8]) -> String {
     let mut hasher = Sha256::new();
-    hasher.update(&bytes);
+    hasher.update(bytes);
     let digest = hasher.finalize();
-    Ok(hex_encode(&digest))
+    hex_encode(&digest)
 }
 
 fn hex_encode(bytes: &[u8]) -> String {
@@ -59,6 +69,14 @@ mod tests {
         let mut b = tempfile::NamedTempFile::new().expect("tempfile");
         b.write_all(b"content b").expect("write");
         assert_ne!(sha256_hex_file(a.path()).unwrap(), sha256_hex_file(b.path()).unwrap());
+    }
+
+    #[test]
+    fn sha256_hex_bytes_matches_the_same_nist_test_vector() {
+        assert_eq!(
+            sha256_hex_bytes(b"abc"),
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
     }
 
     #[test]

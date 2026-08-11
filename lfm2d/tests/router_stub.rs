@@ -20,7 +20,7 @@ use axum::http::{Request, StatusCode};
 use serde_json::{json, Value};
 use tower::ServiceExt;
 
-use lfm2d::engine_stub::StubEngine;
+use lfm2d::engine_stub::{StubEngine, StubTokenClassifier};
 use lfm2d::server::{build_router, AppState};
 use lfm2d::worker::WorkerHandle;
 
@@ -378,6 +378,204 @@ async fn v1_cascade_with_no_cascade_routes_configured_is_400() {
         post_json(router_over(engine), "/v1/cascade", json!({"clauses": ["rm -rf ."]})).await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
     assert!(body["error"]["message"].as_str().unwrap().contains("route"));
+}
+
+// ----------------------------------------------------------- /v1/models (token classifier)
+
+#[tokio::test]
+async fn v1_models_lists_a_token_classifier_with_entity_types_as_labels() {
+    let engine = StubEngine {
+        token_classifiers: vec![StubTokenClassifier::new("pii-detector")],
+        ..StubEngine::default()
+    };
+    let (status, body, _) = get(router_over(engine), "/v1/models").await;
+    assert_eq!(status, StatusCode::OK);
+    let v: Value = serde_json::from_str(&body).unwrap();
+    let models = v.as_array().unwrap();
+    assert_eq!(models.len(), 1);
+    assert_eq!(models[0]["kind"], "token_classifier");
+    assert_eq!(models[0]["id"], "pii-detector");
+    assert!(models[0]["labels"].as_array().unwrap().contains(&json!("credential.api_key")));
+    let hash = models[0]["weight_hash"].as_str().unwrap();
+    assert_eq!(hash.len(), 64);
+}
+
+// ---------------------------------------------------------------- /v1/spans
+
+#[tokio::test]
+async fn spans_happy_path_returns_array_of_arrays_with_audit_headers() {
+    let engine = StubEngine {
+        token_classifiers: vec![StubTokenClassifier::new("pii-detector")],
+        ..StubEngine::default()
+    };
+    let (status, body, headers) =
+        post_json(router_over(engine), "/v1/spans", json!({"inputs": "hello there"})).await;
+    assert_eq!(status, StatusCode::OK);
+    let per_input = body.as_array().expect("response must be a bare JSON array");
+    assert_eq!(per_input.len(), 1, "one span list for one input");
+    assert_eq!(headers.get("x-model-id").unwrap(), "pii-detector");
+    assert_eq!(headers.get("x-model-weight-hash").unwrap().len(), 64);
+}
+
+#[tokio::test]
+async fn spans_never_carry_the_matched_text_only_start_end_entity_score() {
+    let engine = StubEngine {
+        token_classifiers: vec![StubTokenClassifier::new("pii-detector")],
+        ..StubEngine::default()
+    };
+    let (status, body, _) =
+        post_json(router_over(engine), "/v1/spans", json!({"inputs": "sk-live-abc123secret"})).await;
+    assert_eq!(status, StatusCode::OK);
+    let spans = body[0].as_array().unwrap();
+    assert!(!spans.is_empty(), "the stub must have produced at least one span for this test to mean anything");
+    for span in spans {
+        let obj = span.as_object().unwrap();
+        let mut keys: Vec<&str> = obj.keys().map(String::as_str).collect();
+        keys.sort_unstable();
+        assert_eq!(keys, vec!["end", "entity", "score", "start"], "no word/quote/text field, ever");
+        assert!(span["start"].is_number());
+        assert!(span["end"].is_number());
+        assert!(span["entity"].is_string());
+        assert!(span["score"].is_number());
+    }
+}
+
+#[tokio::test]
+async fn spans_accepts_a_batch_one_list_per_input_including_empty_ones() {
+    let engine = StubEngine {
+        token_classifiers: vec![StubTokenClassifier::new("pii-detector")],
+        ..StubEngine::default()
+    };
+    let (status, body, _) =
+        post_json(router_over(engine), "/v1/spans", json!({"inputs": ["hi", "  ", "there"]})).await;
+    assert_eq!(status, StatusCode::OK);
+    let per_input = body.as_array().unwrap();
+    assert_eq!(per_input.len(), 3);
+    assert_eq!(per_input[1].as_array().unwrap().len(), 0, "whitespace-only input yields zero spans");
+}
+
+#[tokio::test]
+async fn spans_rejects_empty_inputs() {
+    let engine = StubEngine {
+        token_classifiers: vec![StubTokenClassifier::new("pii-detector")],
+        ..StubEngine::default()
+    };
+    let (status, body, _) = post_json(router_over(engine), "/v1/spans", json!({"inputs": []})).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(body["error"]["message"].as_str().unwrap().contains("empty"));
+}
+
+#[tokio::test]
+async fn spans_with_no_token_classifier_configured_is_400_not_500() {
+    let (status, body, _) =
+        post_json(router_over(StubEngine::fully_configured()), "/v1/spans", json!({"inputs": "hi"})).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(body["error"]["message"].as_str().unwrap().contains("token classifier"));
+}
+
+#[tokio::test]
+async fn spans_with_exactly_one_head_loaded_the_model_field_is_implicit() {
+    let engine = StubEngine {
+        token_classifiers: vec![StubTokenClassifier::new("only-head")],
+        ..StubEngine::default()
+    };
+    // No "model" field at all — must not 400.
+    let (status, _, headers) = post_json(router_over(engine), "/v1/spans", json!({"inputs": "hi"})).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(headers.get("x-model-id").unwrap(), "only-head");
+}
+
+#[tokio::test]
+async fn spans_with_two_heads_loaded_and_no_model_field_is_400_naming_both_ids() {
+    let engine = StubEngine {
+        token_classifiers: vec![StubTokenClassifier::new("pii-detector"), StubTokenClassifier::new("secrets-only")],
+        ..StubEngine::default()
+    };
+    let (status, body, _) = post_json(router_over(engine), "/v1/spans", json!({"inputs": "hi"})).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    let msg = body["error"]["message"].as_str().unwrap();
+    assert!(msg.contains("pii-detector"), "{msg}");
+    assert!(msg.contains("secrets-only"), "{msg}");
+}
+
+#[tokio::test]
+async fn spans_with_two_heads_loaded_and_a_valid_model_field_picks_it() {
+    let engine = StubEngine {
+        token_classifiers: vec![StubTokenClassifier::new("pii-detector"), StubTokenClassifier::new("secrets-only")],
+        ..StubEngine::default()
+    };
+    let (status, _, headers) = post_json(
+        router_over(engine),
+        "/v1/spans",
+        json!({"inputs": "hi", "model": "secrets-only"}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(headers.get("x-model-id").unwrap(), "secrets-only");
+}
+
+#[tokio::test]
+async fn spans_with_an_unknown_model_name_is_400_naming_available_ids_even_with_one_head() {
+    let engine = StubEngine {
+        token_classifiers: vec![StubTokenClassifier::new("pii-detector")],
+        ..StubEngine::default()
+    };
+    let (status, body, _) = post_json(
+        router_over(engine),
+        "/v1/spans",
+        json!({"inputs": "hi", "model": "does-not-exist"}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    let msg = body["error"]["message"].as_str().unwrap();
+    assert!(msg.contains("does-not-exist"), "{msg}");
+    assert!(msg.contains("pii-detector"), "{msg}");
+}
+
+// ----------------------------------------------------- /v1/spans/credentials
+
+#[tokio::test]
+async fn spans_credentials_only_returns_the_credential_family() {
+    let engine = StubEngine {
+        token_classifiers: vec![StubTokenClassifier::new("pii-detector")],
+        ..StubEngine::default()
+    };
+    // Sweep enough distinct inputs that the stub's deterministic
+    // (text.len() % 3) entity-type rotation actually produces both a
+    // credential.* span and a non-credential span across the batch —
+    // proving the filter is doing real work, not vacuously passing on an
+    // empty batch.
+    let inputs: Vec<String> = (1..=12).map(|n| "x".repeat(n)).collect();
+    let (status, body, headers) = post_json(
+        router_over(engine),
+        "/v1/spans/credentials",
+        json!({"inputs": inputs}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(headers.get("x-model-id").unwrap(), "pii-detector");
+    let per_input = body.as_array().unwrap();
+    assert_eq!(per_input.len(), 12);
+    let mut saw_a_credential_span = false;
+    for spans in per_input {
+        for span in spans.as_array().unwrap() {
+            saw_a_credential_span = true;
+            let entity = span["entity"].as_str().unwrap();
+            assert!(entity.starts_with("credential."), "leaked a non-credential entity: {entity}");
+        }
+    }
+    assert!(saw_a_credential_span, "test setup must actually exercise the filter");
+}
+
+#[tokio::test]
+async fn spans_credentials_with_no_token_classifier_configured_is_400() {
+    let (status, _, _) = post_json(
+        router_over(StubEngine::fully_configured()),
+        "/v1/spans/credentials",
+        json!({"inputs": "hi"}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
 }
 
 // ------------------------------------------------------------ worker fail
