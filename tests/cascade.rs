@@ -104,8 +104,25 @@ const LANES: [&str; 8] = [
 const SHELL: &str = LANES[1];
 const PACKAGE: &str = LANES[6];
 
-/// `kube_ordinal_v6`'s severe set per `findings_clause_decomposition.md`:
-/// "Selecting the clause with the highest `P(mutating) + P(destructive)`".
+/// `kube_ordinal_v6`'s severe labels, in **ascending severity order** —
+/// `severity_rank_weights` reads this order as the ordinal scale, so
+/// `mutating` (the middle rung) must precede `destructive` (the top rung).
+///
+/// `findings_clause_decomposition.md` describes the ORIGINAL rule,
+/// "selecting the clause with the highest `P(mutating) + P(destructive)`".
+/// That sum was replaced on 2026-08-11 because it is not monotone in
+/// severity (see `cascade::severity_rank_weights`), so the severity numbers
+/// pinned below no longer match the ones printed in that document. The
+/// document is not wrong — it is a record of what was measured under the
+/// aggregation in force at the time, and is left alone deliberately.
+///
+/// What did NOT change is the part these tests exist to protect: **every
+/// one of the five pinned rows still selects the same winning clause and
+/// the same lane.** Only the scale of `severity_score` moved, from
+/// `0.0..=1.0` (a sum of two probabilities) to `0.0..=2.0` (an expected
+/// rank over a three-rung scale). Each assertion below therefore carries
+/// both numbers, so a future reader can see that the re-pinning was a
+/// change of units and not a change of verdict.
 const SEVERE: [&str; 2] = ["mutating", "destructive"];
 
 /// A loose tolerance around the findings doc's 3-decimal-rounded numbers.
@@ -144,7 +161,8 @@ fn composite_selects_sudo_bash_from_the_curl_pipe() {
         "the interpreter sink must win the severity ranking, not the fetch"
     );
     assert_eq!(LANES[verdict.winner_lane], SHELL, "the winner must route to shell");
-    assert_close(verdict.clauses[verdict.winner].severity_score, 0.207, "sudo bash severity");
+    // 0.207 under the old sum; 0.241 as an expected rank. See SEVERE's docs.
+    assert_close(verdict.clauses[verdict.winner].severity_score, 0.241, "sudo bash severity");
 }
 
 /// Row 2: `git clone … && cd … && npm install` — `npm install` selected,
@@ -196,9 +214,11 @@ fn composite_selects_the_delete_from_the_guarded_staging_chain() {
         "the delete must win the severity ranking over three benign clauses laundering it"
     );
     assert_eq!(LANES[verdict.winner_lane], SHELL, "the winner must route to shell");
+    // 0.963 under the old sum; 1.910 as an expected rank — almost all of
+    // this clause's mass is on the TOP rung, which the sum could not show.
     assert_close(
         verdict.clauses[verdict.winner].severity_score,
-        0.963,
+        1.910,
         "guarded rm -rf severity",
     );
 }
@@ -223,9 +243,10 @@ fn composite_selects_the_delete_from_the_bypassed_staging_chain() {
         "the softened-flag delete must still win the severity ranking"
     );
     assert_eq!(LANES[verdict.winner_lane], SHELL, "the winner must route to shell");
+    // 0.968 under the old sum; 1.926 as an expected rank.
     assert_close(
         verdict.clauses[verdict.winner].severity_score,
-        0.968,
+        1.926,
         "bypassed rm -r severity",
     );
 
@@ -267,7 +288,8 @@ fn composite_selects_the_delete_from_the_nav_trap_chain() {
          alone saturates — this is the exact failure severity-ranking-then-routing is \
          supposed to route around"
     );
-    assert_close(verdict.clauses[verdict.winner].severity_score, 0.955, "rm -rf . severity");
+    // 0.955 under the old sum; 1.901 as an expected rank.
+    assert_close(verdict.clauses[verdict.winner].severity_score, 1.901, "rm -rf . severity");
 
     // The hazard the router alone has (a navigation clause poisoning the
     // union) is a router-level property, not something the cascade's

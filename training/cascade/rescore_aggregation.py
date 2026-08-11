@@ -1,9 +1,15 @@
 #!/usr/bin/env python3
 """Re-score cascade winner selection under alternative severity aggregations.
 
-The shipped cascade ranks clauses by `severity_score = sum(P(label) for label
-in severe_labels)` — for v6 that is P(mutating)+P(destructive), for v7/v8 it is
-P(situation-normal)+P(data-critical). That sum is NOT monotone in severity: the
+HISTORY: until 2026-08-11 the cascade ranked clauses by
+`severity_score = sum(P(label) for label in severe_labels)` — for v6 that is
+P(mutating)+P(destructive), for v7/v8 P(situation-normal)+P(data-critical).
+This script is what measured the case for replacing it; the library now ships
+`expected_rank` (see `cascade::severity_rank_weights`). Both aggregations are
+kept here because every recorded eval artifact was scored under the sum, and
+dropping it would make those numbers unreproducible.
+
+That sum is NOT monotone in severity: the
 severe set spans two rungs of an ordinal scale, so probability mass moving from
 the middle rung to the top rung (a clause getting MORE severe) leaves the sum
 unchanged at best and lowers it whenever the informative rung picks up any mass.
@@ -65,7 +71,12 @@ def agg_expected_rank(probs, labels):
     return sum(p * ORDINAL_RANK[lab] for p, lab in zip(probs, labels))
 
 
-AGGS = [('sum (shipped)', agg_sum), ('expected_rank', agg_expected_rank)]
+# `sum` was the shipped aggregation until 2026-08-11, when the measurement
+# below moved the library to `expected_rank`. It is kept here as the
+# comparison baseline — the recorded eval artifacts were all scored under it,
+# so removing it would make those numbers unreproducible, which is the exact
+# failure `commit-the-scorer` exists to prevent.
+AGGS = [('sum (historical)', agg_sum), ('expected_rank (shipped)', agg_expected_rank)]
 
 
 def winner_under(row, labels, agg):
@@ -117,7 +128,7 @@ def score(raw, probes, tag):
         print(f"  {agg_name:16s} winner selection: {correct}/{total} = {pct:.1f}%")
 
     # Detail only for the alternative, and only where it disagrees.
-    _, _, _, flipped = results['expected_rank']
+    _, _, _, flipped = results['expected_rank (shipped)']
     if flipped:
         print(f"  expected_rank changes the winner on {len(flipped)} row(s):")
         for pid, was, now, was_ok, now_ok in flipped:

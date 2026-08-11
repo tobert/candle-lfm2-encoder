@@ -177,6 +177,80 @@ pub fn resolve_severe_labels<L: AsRef<str>>(
         .collect()
 }
 
+/// Per-label weights for the expected-ordinal-rank severity score: a
+/// non-severe label weighs `0.0`, and the `i`th severe label (in the
+/// CALLER's order) weighs `i + 1`.
+///
+/// # Why the caller's order, and why that matters
+///
+/// The rank of a label cannot be read off the checkpoint. `kube_ordinal_v6`
+/// stores its labels as `["destructive", "informative", "mutating"]` — array
+/// position is an artifact of training, not a severity ordering. So the
+/// ordering has to come from the caller, and `severe_labels` is therefore
+/// **ascending severity, least severe first**: `["situation-normal",
+/// "data-critical"]`, not the reverse.
+///
+/// Passing them in the wrong order silently inverts the ranking, which is
+/// precisely the kind of quiet wrong answer this crate refuses elsewhere —
+/// and it cannot be detected from the label names alone. Two things
+/// mitigate it: duplicates are rejected here (a repeated label has no
+/// unambiguous rank), and callers SHOULD echo the resolved ranking at
+/// startup so a mistake is visible immediately rather than at the first
+/// surprising verdict. Long-lived callers that load a checkpoint once —
+/// `lfm2d` in particular — are the ones this matters for; a one-shot CLI
+/// run shows its own arguments.
+///
+/// # Why not just sum the severe probabilities
+///
+/// That was the original aggregation and it is **not monotone in severity**.
+/// The severe set spans two rungs of an ordinal scale, so probability mass
+/// moving from the middle rung to the top rung — a clause getting *more*
+/// severe — leaves the sum unchanged at best, and lowers it whenever the
+/// bottom rung picks up any mass. Observed live on the deployed v8 daemon
+/// 2026-08-11: `psql -f drop_all.sql` (data-critical 0.600) scored 0.8299
+/// and ranked BELOW `psql -f 001_init.sql` (data-critical 0.330) at 0.9298.
+/// The model was right; the aggregation discarded the distinction.
+///
+/// Measured against the pinned probe set before switching (see
+/// `training/cascade/rescore_aggregation.py`, which recomputes from the
+/// recorded eval artifacts): winner selection went 33→35/36 on v6,
+/// unchanged 33/36 on v7, and 34→35/36 on v8. Never worse on any checkpoint.
+///
+/// # Consequence for callers
+///
+/// [`ClauseVerdict::severity_score`] is no longer bounded by `1.0` — its
+/// range is `0.0..=n` for `n` severe labels (so `0.0..=2.0` for the usual
+/// three-rung vocabulary). It remains a RANKING signal with no meaningful
+/// absolute cutoff, exactly as before; nothing in this crate thresholds it.
+pub fn severity_rank_weights<L: AsRef<str>>(
+    id2label: &[String],
+    severe_labels: &[L],
+) -> Result<Vec<f32>> {
+    let severe_ids = resolve_severe_labels(id2label, severe_labels)?;
+
+    let mut weights = vec![0.0f32; id2label.len()];
+    for (rank, &id) in severe_ids.iter().enumerate() {
+        if weights[id] != 0.0 {
+            return Err(Error::InvalidInput(format!(
+                "severe label {:?} appears more than once — its ordinal rank would be \
+                 ambiguous; list each label once, in ascending severity order",
+                id2label[id]
+            )));
+        }
+        weights[id] = (rank + 1) as f32;
+    }
+    Ok(weights)
+}
+
+/// The expected ordinal rank: `sum(weight[i] * probs[i])`.
+///
+/// Kept separate from [`Cascade::run`] so the aggregation is testable
+/// without a model, and so the monotonicity property has something to
+/// assert against directly.
+pub fn severity_score_from_probs(probs: &[f32], rank_weights: &[f32]) -> f32 {
+    probs.iter().zip(rank_weights).map(|(p, w)| p * w).sum()
+}
+
 /// Pure aggregation: per-clause results → one statement verdict. No model
 /// calls happen here — this is what makes the composite rule unit-testable
 /// without weights (see `tests/cascade.rs`'s contract tests, and
@@ -339,13 +413,15 @@ impl<'a> Cascade<'a> {
                     .to_string(),
             ));
         }
-        let severe_ids = resolve_severe_labels(self.classifier.labels(), severe_labels)?;
+        // Expected ordinal rank, NOT a sum over the severe labels — the sum
+        // is not monotone in severity. See `severity_rank_weights`.
+        let rank_weights = severity_rank_weights(self.classifier.labels(), severe_labels)?;
 
         let mut verdicts = Vec::with_capacity(clauses.len());
         for clause in clauses {
             let text = clause.as_ref();
             let severity_probs = self.classifier.predict(text)?;
-            let severity_score: f32 = severe_ids.iter().map(|&i| severity_probs[i]).sum();
+            let severity_score: f32 = severity_score_from_probs(&severity_probs, &rank_weights);
             if !severity_score.is_finite() {
                 return Err(Error::InvalidInput(format!(
                     "clause {text:?} produced a non-finite severity score \
@@ -488,5 +564,134 @@ mod tests {
         let labels = vec!["destructive".to_string(), "informative".to_string(), "mutating".to_string()];
         let ids = resolve_severe_labels(&labels, &["mutating", "destructive"]).expect("both present");
         assert_eq!(ids, vec![2, 0]);
+    }
+
+    // ---------------------------------------------------------------
+    // Severity ranking (expected ordinal rank). See the module docs for
+    // why summing the severe rungs was replaced.
+
+    #[test]
+    fn severity_ranks_weight_by_position_in_the_caller_s_order() {
+        // v8's vocabulary, stored in ordinal order.
+        let labels = vec![
+            "informative".to_string(),
+            "situation-normal".to_string(),
+            "data-critical".to_string(),
+        ];
+        let w = severity_rank_weights(&labels, &["situation-normal", "data-critical"])
+            .expect("both present");
+        // Non-severe labels weigh 0; severe labels weigh 1..=n in the
+        // caller's ascending order.
+        assert_eq!(w, vec![0.0, 1.0, 2.0]);
+    }
+
+    #[test]
+    fn severity_ranks_follow_the_callers_order_not_the_checkpoints() {
+        // v6 stores its labels in a NON-ordinal order — this is the whole
+        // reason rank cannot be derived from the checkpoint.
+        let labels = vec![
+            "destructive".to_string(),
+            "informative".to_string(),
+            "mutating".to_string(),
+        ];
+        let w = severity_rank_weights(&labels, &["mutating", "destructive"]).expect("both present");
+        // destructive is stored FIRST but ranks HIGHEST (2.0); mutating is
+        // stored last but is the middle rung (1.0).
+        assert_eq!(w, vec![2.0, 0.0, 1.0]);
+    }
+
+    #[test]
+    fn severity_ranks_reject_a_duplicate_label() {
+        let labels = vec![
+            "informative".to_string(),
+            "situation-normal".to_string(),
+            "data-critical".to_string(),
+        ];
+        let err = severity_rank_weights(&labels, &["data-critical", "data-critical"])
+            .expect_err("a duplicated label has no unambiguous rank");
+        let msg = err.to_string();
+        assert!(msg.contains("data-critical"), "{msg}");
+    }
+
+    #[test]
+    fn severity_ranks_reject_empty_and_unknown_like_the_set_does() {
+        let labels = vec!["informative".to_string(), "mutating".to_string()];
+        let empty: [&str; 0] = [];
+        assert!(severity_rank_weights(&labels, &empty).is_err());
+        let err = severity_rank_weights(&labels, &["mutating", "catastrophic"])
+            .expect_err("unknown label must be refused");
+        assert!(err.to_string().contains("catastrophic"));
+    }
+
+    /// THE REGRESSION TEST. Observed live on the deployed v8 daemon
+    /// 2026-08-11, with the shipped sum-of-severe-rungs aggregation:
+    ///
+    ///     psql -f 001_init.sql   inf 0.0702  sn 0.6002  dc 0.3296
+    ///     psql -f drop_all.sql   inf 0.1701  sn 0.2297  dc 0.6002
+    ///
+    /// The second clause is nearly twice as data-critical, and the sum
+    /// ranked it BELOW the first (0.9298 vs 0.8299) because probability
+    /// mass moving from the middle rung to the top rung leaves the sum
+    /// unchanged at best, and lowers it whenever the bottom rung gains any.
+    /// Expected ordinal rank is monotone by construction and cannot do this.
+    #[test]
+    fn a_more_data_critical_clause_outranks_a_less_data_critical_one() {
+        let labels = vec![
+            "informative".to_string(),
+            "situation-normal".to_string(),
+            "data-critical".to_string(),
+        ];
+        let w = severity_rank_weights(&labels, &["situation-normal", "data-critical"]).unwrap();
+
+        let init = severity_score_from_probs(&[0.0702, 0.6002, 0.3296], &w);
+        let drop_all = severity_score_from_probs(&[0.1701, 0.2297, 0.6002], &w);
+
+        // The old sum ranked these the wrong way round; assert the sum
+        // really would have, so this test documents the defect it guards.
+        let old_sum_init = 0.6002 + 0.3296;
+        let old_sum_drop = 0.2297 + 0.6002;
+        assert!(
+            old_sum_init > old_sum_drop,
+            "the historical defect should reproduce: {old_sum_init} vs {old_sum_drop}"
+        );
+
+        assert!(
+            drop_all > init,
+            "dropping all tables must outrank a schema init: {drop_all} vs {init}"
+        );
+    }
+
+    /// Monotonicity as a property, not just on the one observed pair:
+    /// moving probability mass UP the ordinal scale must never lower the
+    /// score. This is the invariant the sum violated.
+    #[test]
+    fn moving_mass_up_the_scale_never_lowers_the_score() {
+        let labels = vec![
+            "informative".to_string(),
+            "situation-normal".to_string(),
+            "data-critical".to_string(),
+        ];
+        let w = severity_rank_weights(&labels, &["situation-normal", "data-critical"]).unwrap();
+
+        // Walk mass from `informative` all the way to `data-critical` in
+        // steps, through the middle rung, and require a non-decreasing score.
+        let mut previous = f32::NEG_INFINITY;
+        for step in 0..=20 {
+            let t = step as f32 / 20.0;
+            // t=0: all informative. t=0.5: all situation-normal. t=1: all data-critical.
+            let probs = if t <= 0.5 {
+                let u = t * 2.0;
+                [1.0 - u, u, 0.0]
+            } else {
+                let u = (t - 0.5) * 2.0;
+                [0.0, 1.0 - u, u]
+            };
+            let score = severity_score_from_probs(&probs, &w);
+            assert!(
+                score >= previous - 1e-6,
+                "score fell from {previous} to {score} while mass moved UP the scale (t={t})"
+            );
+            previous = score;
+        }
     }
 }

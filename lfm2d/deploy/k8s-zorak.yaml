@@ -71,6 +71,13 @@ spec:
             - --router-dir=/models/LFM2.5-Encoder-350M-Prompt-Router
             - --cascade-route=shell
             - --cascade-route=k8s
+            # ORDER IS SEMANTIC: ascending severity, least severe first.
+            # As of 2026-08-11 the cascade ranks by expected ordinal rank,
+            # so the Nth severe label here weighs N. Reversing these two
+            # lines inverts the ranking, and no error will be raised —
+            # the label names are both valid, only their order is wrong.
+            # Verify against /v1/cascade output, where a clearly destructive
+            # clause must score near the top of the 0..2 range.
             - --cascade-severe-label=situation-normal
             - --cascade-severe-label=data-critical
             - --bind-addr=0.0.0.0:8088
