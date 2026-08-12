@@ -353,6 +353,76 @@ def test_known_vocabulary_still_classifies(_c):
     check('known vocabulary classifies normally', bucket == 'lfm2d_only', f'bucket={bucket}')
 
 
+def test_breaker_opens_after_repeated_failures(_c):
+    """An lfm2d outage must stop taxing every Bash call. Without the breaker,
+    a black-holed host costs the full timeout forever (measured 447ms)."""
+    down = {'LFM2D_URL': 'http://192.0.2.1:8088', 'LFM2D_HOOK_TIMEOUT': '0.3',
+            'LFM2D_BREAKER_THRESHOLD': '3', 'LFM2D_BREAKER_COOLDOWN': '60'}
+    with tempfile.TemporaryDirectory() as d:
+        cache = Path(d)
+        walls, buckets = [], []
+        for _ in range(5):
+            _, rows, w = run_hook('ls -la /home', cache, down)
+            walls.append(w)
+            buckets.append(rows[0]['disagree'] if rows else 'NO ROW')
+
+    opened = buckets[3:] == ['circuit_open', 'circuit_open']
+    fast = max(walls[3:]) < min(walls[:3])
+    check('breaker opens after repeated failures', opened and fast,
+          f"buckets={buckets} walls={[f'{w*1000:.0f}ms' for w in walls]}")
+
+
+def test_breaker_still_logs_while_open(_c):
+    """A skipped call and a healthy quiet period must not look alike in the
+    log, or the record overstates how much lfm2d actually saw."""
+    down = {'LFM2D_URL': 'http://192.0.2.1:8088', 'LFM2D_HOOK_TIMEOUT': '0.3',
+            'LFM2D_BREAKER_THRESHOLD': '2', 'LFM2D_BREAKER_COOLDOWN': '60'}
+    with tempfile.TemporaryDirectory() as d:
+        cache = Path(d)
+        for _ in range(4):
+            _, rows, _ = run_hook('ls -la /home', cache, down)
+        last = rows[0] if rows else None
+    ok = last and last['disagree'] == 'circuit_open' and last['lfm2d'].get('detail')
+    check('breaker still logs a row while open', bool(ok), f'last={last}')
+
+
+def test_breaker_never_changes_the_decision(_c):
+    """The breaker is an optimization, not a policy. Even fully open, the
+    regex verdict must be what it always was."""
+    down = {'LFM2D_URL': 'http://192.0.2.1:8088', 'LFM2D_HOOK_TIMEOUT': '0.3',
+            'LFM2D_BREAKER_THRESHOLD': '1', 'LFM2D_BREAKER_COOLDOWN': '60'}
+    bad = []
+    for cmd in ('ls -la /home', 'rm -rf ./build', 'git add -A'):
+        with tempfile.TemporaryDirectory() as a, tempfile.TemporaryDirectory() as b:
+            off, _, _ = run_hook(cmd, Path(a), {'LFM2D_HOOK_MODE': 'off'})
+            # Trip the breaker with a DIFFERENT, non-soft-blocked command.
+            # Using `cmd` itself here would leave an approval in the
+            # soft-block cache, and the second call would take the
+            # approved-retry path instead of the one under test — which is
+            # exactly how this test failed the first time it ran.
+            run_hook('echo tripping-the-breaker', Path(b), down)
+            open_dec, _, _ = run_hook(cmd, Path(b), down)  # breaker now open
+        if off != open_dec:
+            bad.append((cmd, off, open_dec))
+    check('breaker never changes the decision', not bad, str(bad))
+
+
+def test_breaker_closes_on_a_good_response(_c):
+    """One success is sufficient evidence the service came back."""
+    down = {'LFM2D_URL': 'http://192.0.2.1:8088', 'LFM2D_HOOK_TIMEOUT': '0.3',
+            'LFM2D_BREAKER_THRESHOLD': '1', 'LFM2D_BREAKER_COOLDOWN': '0'}
+    with tempfile.TemporaryDirectory() as d:
+        cache = Path(d)
+        run_hook('ls -la /home', cache, down)  # fail -> open (cooldown 0)
+        # cooldown 0 means the next call is allowed through; point it at the
+        # real daemon and the circuit must close.
+        _, rows, _ = run_hook('ls -la /home', cache,
+                              {'LFM2D_BREAKER_THRESHOLD': '1', 'LFM2D_BREAKER_COOLDOWN': '0'})
+        state = json.loads((cache / 'claude-hooks' / 'lfm2d-breaker.json').read_text())
+    ok = rows and rows[0]['lfm2d'].get('ok') and state['consecutive_failures'] == 0
+    check('breaker closes on a good response', bool(ok), f'state={state} row={rows[0] if rows else None}')
+
+
 TESTS = [
     test_advisory_never_changes_the_decision,
     test_every_bash_call_logs_one_row,
@@ -369,6 +439,10 @@ TESTS = [
     test_malformed_body_fails_open,
     test_unknown_label_vocabulary_is_loud,
     test_known_vocabulary_still_classifies,
+    test_breaker_opens_after_repeated_failures,
+    test_breaker_still_logs_while_open,
+    test_breaker_never_changes_the_decision,
+    test_breaker_closes_on_a_good_response,
 ]
 
 

@@ -110,6 +110,21 @@ CACHE_DIR = Path(os.environ.get('XDG_CACHE_HOME', Path.home() / '.cache')) / 'cl
 SOFT_BLOCK_CACHE = CACHE_DIR / 'soft-blocked.jsonl'
 SOFT_BLOCK_TTL = 300  # 5 minutes
 ADVISORY_LOG = CACHE_DIR / 'lfm2d-advisory.jsonl'
+BREAKER_STATE = CACHE_DIR / 'lfm2d-breaker.json'
+
+# Circuit breaker. Without one, an lfm2d outage taxes EVERY Bash call in
+# every session the full LFM2D_HOOK_TIMEOUT — measured 447 ms against a
+# black-holed host — for as long as the outage lasts. The verdict is
+# advisory, so paying half a second per command to re-learn "still down" is
+# pure loss.
+#
+# After BREAKER_THRESHOLD consecutive failures, stop calling for
+# BREAKER_COOLDOWN_S, then let exactly one call through to test the water.
+# Deliberately NOT silent: skipped calls are logged as `circuit_open` rows,
+# so a quiet stretch in the advisory log is distinguishable from a stretch
+# where we simply stopped asking.
+BREAKER_THRESHOLD = int(os.environ.get('LFM2D_BREAKER_THRESHOLD', '3'))
+BREAKER_COOLDOWN_S = float(os.environ.get('LFM2D_BREAKER_COOLDOWN', '60'))
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # BLOCKED / SOFT_BLOCKED / WARNED — VERBATIM from the current hook.
@@ -195,6 +210,41 @@ def lfm2d_classify(cmd: str) -> dict:
         return {'ok': False, 'error': type(e).__name__, 'detail': str(e)[:200]}
 
 
+def breaker_read() -> dict:
+    try:
+        return json.loads(BREAKER_STATE.read_text())
+    except Exception:
+        return {'consecutive_failures': 0, 'open_until': 0.0}
+
+
+def breaker_write(state: dict):
+    try:
+        CACHE_DIR.mkdir(parents=True, exist_ok=True)
+        BREAKER_STATE.write_text(json.dumps(state))
+    except Exception:
+        pass
+
+
+def breaker_should_skip() -> bool:
+    return time.time() < breaker_read().get('open_until', 0.0)
+
+
+def breaker_record(ok: bool):
+    """One success closes the circuit outright.
+
+    Not a decaying counter or a rolling window: this guards a local network
+    call with no cost to being wrong in the optimistic direction, and a
+    single good response is sufficient evidence the service came back.
+    """
+    state = breaker_read()
+    if ok:
+        breaker_write({'consecutive_failures': 0, 'open_until': 0.0})
+        return
+    fails = state.get('consecutive_failures', 0) + 1
+    open_until = time.time() + BREAKER_COOLDOWN_S if fails >= BREAKER_THRESHOLD else 0.0
+    breaker_write({'consecutive_failures': fails, 'open_until': open_until})
+
+
 def log_advisory(cmd: str, regex_verdict: dict, lfm2d_verdict: dict):
     """Append one comparison row. Best-effort: logging must never block a command."""
     try:
@@ -218,7 +268,7 @@ def log_advisory(cmd: str, regex_verdict: dict, lfm2d_verdict: dict):
         pass
 
 
-def _disagreement(regex_verdict: dict, lfm2d_verdict: dict) -> str:
+def _disagreement(regex_verdict: dict, lfm2d_verdict: dict) -> str:  # noqa: C901
     """Bucket one comparison. Returns 'vocab_mismatch' rather than guessing
     when the checkpoint doesn't speak the labels we're keying on.
 
@@ -234,7 +284,7 @@ def _disagreement(regex_verdict: dict, lfm2d_verdict: dict) -> str:
     already in hand on every call.
     """
     if not lfm2d_verdict.get('ok'):
-        return 'no_verdict'
+        return 'circuit_open' if lfm2d_verdict.get('error') == 'circuit_open' else 'no_verdict'
 
     scores = lfm2d_verdict.get('scores') or {}
     known = [l for l in SEVERE_LABELS if l in scores]
@@ -381,7 +431,15 @@ def main():
 
     lfm2d = {'ok': False, 'error': 'disabled'}
     if LFM2D_MODE != 'off':
-        lfm2d = lfm2d_classify(cmd)
+        if breaker_should_skip():
+            # Still logged. A skipped call and a healthy quiet period must not
+            # look the same in the advisory log, or the record silently
+            # overstates how much of the session lfm2d actually saw.
+            lfm2d = {'ok': False, 'error': 'circuit_open',
+                     'detail': f'{BREAKER_THRESHOLD}+ consecutive failures; not retrying yet'}
+        else:
+            lfm2d = lfm2d_classify(cmd)
+            breaker_record(lfm2d.get('ok', False))
         log_advisory(cmd, verdict, lfm2d)
 
     if LFM2D_MODE == 'enforce':
