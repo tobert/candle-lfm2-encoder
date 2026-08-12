@@ -51,6 +51,15 @@ pub mod sequence_classification;
 pub mod token_classification;
 pub mod trunk;
 
+// Every `from_dir_with` in this crate takes a `DType` and a `&Device`, so a
+// caller that wants anything other than the f32/CPU default cannot use the
+// public API without naming candle's types. Re-exported here so they don't
+// have to add candle-core as a direct dependency and keep its version
+// pinned in lockstep with ours — the version coupling is the real hazard,
+// since a mismatched candle would produce two incompatible `DType` types
+// with identical names and a baffling error message.
+pub use candle_core::{DType, Device};
+
 // `severity_rank_weights` is re-exported alongside its sibling
 // `resolve_severe_labels` because its own docs instruct callers to echo the
 // resolved ranking at startup (naming `lfm2d` as the caller that needs it) —

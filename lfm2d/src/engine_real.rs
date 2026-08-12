@@ -19,8 +19,8 @@
 use std::path::Path;
 
 use lfm2_encoder::{
-    resolve_severe_labels, Cascade, Lfm2Embedding, Lfm2EncoderConfig, Lfm2SequenceClassifier,
-    Lfm2SequenceRouter, Lfm2TokenClassifier, TextKind,
+    resolve_severe_labels, Cascade, Device, Lfm2Embedding, Lfm2EncoderConfig,
+    Lfm2SequenceClassifier, Lfm2SequenceRouter, Lfm2TokenClassifier, TextKind,
 };
 
 use crate::config::Cli;
@@ -97,9 +97,13 @@ impl RealEngine {
     /// zero out every clause's severity score on the first real request
     /// instead of failing at the moment the operator could still fix it.
     pub fn load(cli: &Cli) -> Result<Self, String> {
+        // One dtype for every head, deliberately: a mixed-precision set
+        // would make the audit story ("this hash, at this precision")
+        // per-head, and nothing here needs that yet.
+        let dtype = cli.dtype.to_dtype();
         let embedder = match &cli.embedder_dir {
             Some(dir) => {
-                let model = Lfm2Embedding::from_dir(dir)
+                let model = Lfm2Embedding::from_dir_with(dir, dtype, &Device::Cpu)
                     .map_err(|e| format!("loading embedder at {}: {e}", dir.display()))?;
                 let meta = load_meta(dir)?;
                 Some((model, meta))
@@ -108,7 +112,7 @@ impl RealEngine {
         };
         let classifier = match &cli.classifier_dir {
             Some(dir) => {
-                let model = Lfm2SequenceClassifier::from_dir(dir)
+                let model = Lfm2SequenceClassifier::from_dir_with(dir, dtype, &Device::Cpu)
                     .map_err(|e| format!("loading classifier at {}: {e}", dir.display()))?;
                 let meta = load_meta(dir)?;
                 Some((model, meta))
@@ -117,7 +121,7 @@ impl RealEngine {
         };
         let router = match &cli.router_dir {
             Some(dir) => {
-                let model = Lfm2SequenceRouter::from_dir(dir)
+                let model = Lfm2SequenceRouter::from_dir_with(dir, dtype, &Device::Cpu)
                     .map_err(|e| format!("loading router at {}: {e}", dir.display()))?;
                 let meta = load_meta(dir)?;
                 Some((model, meta))
@@ -131,7 +135,7 @@ impl RealEngine {
         // N-1.
         let mut token_classifiers = Vec::with_capacity(cli.token_classifier_dir.len());
         for dir in &cli.token_classifier_dir {
-            let model = Lfm2TokenClassifier::from_dir(dir)
+            let model = Lfm2TokenClassifier::from_dir_with(dir, dtype, &Device::Cpu)
                 .map_err(|e| format!("loading token classifier at {}: {e}", dir.display()))?;
             let meta = load_meta(dir)?;
             token_classifiers.push((model, meta));
@@ -174,14 +178,63 @@ impl RealEngine {
                 .map_err(|e| format!("--cascade-severe-label: {e}"))?;
         }
 
-        Ok(Self {
+        let engine = Self {
             embedder,
             classifier,
             router,
             token_classifiers,
             cascade_routes: cli.cascade_routes.clone(),
             cascade_severe_labels: cli.cascade_severe_labels.clone(),
-        })
+        };
+        engine.smoke_test(dtype)?;
+        Ok(engine)
+    }
+
+    /// Run one tiny forward through every loaded head, so a dtype the build
+    /// cannot actually compute in fails HERE rather than on the first real
+    /// request.
+    ///
+    /// # Why this exists
+    ///
+    /// Loading a checkpoint at a given dtype succeeds independently of
+    /// whether the ops can run at it. Measured 2026-08-12: `--dtype bf16`
+    /// loads cleanly, logs "loaded model", answers `/healthz` and
+    /// `/v1/models`, and then returns 500
+    /// `unsupported dtype BF16 for op matmul` on every single inference
+    /// call. A daemon that reports healthy and fails every request is worse
+    /// than one that refuses to start — it passes a rollout's checks and
+    /// then breaks production silently.
+    ///
+    /// This is the same lesson as `--cascade-severe-label`: a configuration
+    /// that is individually valid at every step can still compose into an
+    /// endpoint that refuses everything. Deliberately a real forward rather
+    /// than a dtype allowlist, so it stays correct when candle gains or
+    /// loses an op — the build in front of us is the authority, not a list
+    /// in this file.
+    fn smoke_test(&self, dtype: lfm2_encoder::DType) -> Result<(), String> {
+        const PROBE: &str = "ok";
+        let fail = |what: &str, e: String| {
+            format!(
+                "the {what} head loaded at --dtype {dtype:?} but cannot run a forward pass at it: \
+                 {e}. Refusing to start: this daemon would answer /healthz and then fail every \
+                 inference request. Use --dtype f32 (or f16), or rebuild with support for {dtype:?}."
+            )
+        };
+
+        if let Some((m, _)) = &self.embedder {
+            m.embed(PROBE, TextKind::Document).map_err(|e| fail("embedder", e.to_string()))?;
+        }
+        if let Some((m, _)) = &self.classifier {
+            m.predict(PROBE).map_err(|e| fail("classifier", e.to_string()))?;
+        }
+        if let Some((m, _)) = &self.router {
+            m.route_cosines(PROBE, &["a"]).map_err(|e| fail("router", e.to_string()))?;
+        }
+        for (m, meta) in &self.token_classifiers {
+            m.predict(PROBE)
+                .map_err(|e| fail(&format!("token classifier {}", meta.id), e.to_string()))?;
+        }
+        Ok(())
     }
 
     /// Resolve which loaded token-classification head answers a

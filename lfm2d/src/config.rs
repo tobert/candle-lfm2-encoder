@@ -4,7 +4,28 @@
 
 use std::path::PathBuf;
 
-use clap::Parser;
+use clap::{Parser, ValueEnum};
+use lfm2_encoder::DType;
+
+/// Compute dtype, as spelled on the command line. A closed enum rather than
+/// a free string so `clap` rejects a typo at parse time with the valid set
+/// named, instead of the daemon discovering it mid-load.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
+pub enum DtypeArg {
+    F32,
+    F16,
+    Bf16,
+}
+
+impl DtypeArg {
+    pub fn to_dtype(self) -> DType {
+        match self {
+            DtypeArg::F32 => DType::F32,
+            DtypeArg::F16 => DType::F16,
+            DtypeArg::Bf16 => DType::BF16,
+        }
+    }
+}
 
 /// `lfm2d` — HTTP sidecar serving LFM2.5 encoder heads. Loads every
 /// configured checkpoint once at startup (no lazy loading); serves the same
@@ -106,6 +127,33 @@ pub struct Cli {
     /// or `--socket-path` is required.
     #[arg(long, env = "LFM2D_BIND_ADDR")]
     pub bind_addr: Option<String>,
+
+    /// Compute dtype every head is loaded and run at: `f32` (default),
+    /// `f16`, or `bf16`.
+    ///
+    /// # Read this before reaching for f16
+    ///
+    /// **The LFM2.5 encoder checkpoints ship f32 natively** — verified
+    /// 2026-08-12 from the safetensors headers: Encoder-350M,
+    /// Prompt-Router and PII-Detector are all `F32`, ~1352 MiB each, with
+    /// `torch_dtype: float32` in their configs. `kube_ordinal_v8` is f32
+    /// too. So f16 is a genuine *loss* of shipped resolution here, not the
+    /// removal of a pointless upcast.
+    ///
+    /// **The lone exception is `LFM2.5-Embedding-350M`, which ships
+    /// `BF16`** (676 MiB). bf16→f32 is lossless; bf16→**f16 is not**, and
+    /// not merely in mantissa — bf16 carries f32's 8 exponent bits against
+    /// f16's 5, so values outside f16's range become inf/0 rather than
+    /// rounding. Loading that checkpoint as f16 is the one combination here
+    /// that can quietly produce wrong numbers instead of slow ones.
+    ///
+    /// **And f16 trades the constraint that binds for the one that
+    /// doesn't.** Measured on this workload, f16 halves memory at ~1.6×
+    /// latency, while the cost that actually hurts is a forward pass in an
+    /// interactive path. Reach for this when a box is memory-bound (zorak's
+    /// `system-reserved` arithmetic), not to make things faster.
+    #[arg(long, env = "LFM2D_DTYPE", default_value = "f32")]
+    pub dtype: DtypeArg,
 
     /// Size of the rayon global thread pool that candle's matmul runs on
     /// (`rayon::ThreadPoolBuilder::num_threads`), set BEFORE any model is
@@ -231,6 +279,7 @@ mod tests {
             cascade_severe_labels: vec!["mutating".into(), "destructive".into()],
             socket_path: None,
             bind_addr: None,
+            dtype: DtypeArg::F32,
             threads: None,
         }
     }
@@ -271,6 +320,7 @@ mod tests {
             cascade_severe_labels: vec!["mutating".into()],
             socket_path: Some("/tmp/lfm2d.sock".into()),
             bind_addr: Some("0.0.0.0:8080".into()),
+            dtype: DtypeArg::F32,
             threads: Some(4),
         };
         cli.validate().expect("fully specified config is valid");

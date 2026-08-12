@@ -59,6 +59,7 @@ fn cli_with_classifier_only() -> Cli {
         cascade_severe_labels: vec!["mutating".to_string(), "destructive".to_string()],
         socket_path: None,
         bind_addr: None,
+        dtype: lfm2d::config::DtypeArg::F32,
         threads: None,
     }
 }
