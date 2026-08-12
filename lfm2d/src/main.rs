@@ -113,6 +113,49 @@ async fn main() {
             "lfm2d: loaded model"
         );
     }
+
+    // The severe-label ORDER is the ordinal severity scale, and reversing it
+    // silently inverts every /v1/cascade ranking — both names are valid, so
+    // `RealEngine::load`'s resolve step passes and the endpoint just starts
+    // naming the least severe clause as the winner. Echoing the raw flag (as
+    // the config line above does) cannot expose that: a reversed list reads
+    // like an ordinary list. Rendering the RESOLVED ranking can, because
+    // `1=data-critical 2=situation-normal` is wrong on sight.
+    //
+    // Deliberately its own line rather than a field on the config line: this
+    // is the one startup line an operator is asked to re-read after touching
+    // --cascade-severe-label, and burying it among twelve other fields is how
+    // it stops being read. Only emitted when a cascade is actually configured,
+    // matching `RealEngine::load` — with no --cascade-route there is no
+    // ranking to get wrong.
+    //
+    // Unreachable-by-construction: load() already resolved these same labels
+    // against these same classifier labels and exited non-zero on failure, so
+    // an Err here would mean the two disagreed. Log it loudly rather than
+    // unwrap — a startup diagnostic must never be the thing that kills the
+    // process it is diagnosing.
+    if !cli.cascade_routes.is_empty() {
+        let classifier_labels = models
+            .iter()
+            .find(|m| m.kind == lfm2d::types::ModelKind::Classifier)
+            .and_then(|m| m.labels.clone())
+            .unwrap_or_default();
+        match lfm2d::config::resolved_severity_ranking(&classifier_labels, &cli.cascade_severe_labels)
+        {
+            Ok(ranked) => tracing::info!(
+                ranking = %lfm2d::config::render_severity_ranking(&ranked),
+                classifier_labels = ?classifier_labels,
+                "lfm2d: cascade severity ranking (ascending, least severe first) — \
+                 re-read this after any --cascade-severe-label change; a reversed \
+                 flag inverts /v1/cascade's winner and raises no error"
+            ),
+            Err(e) => tracing::error!(
+                error = %e,
+                "lfm2d: could not render the cascade severity ranking — startup \
+                 validation passed, so this disagreeing is a bug, not a misconfiguration"
+            ),
+        }
+    }
     tracing::info!(
         available_parallelism,
         configured_threads = threads,

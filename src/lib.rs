@@ -51,7 +51,13 @@ pub mod sequence_classification;
 pub mod token_classification;
 pub mod trunk;
 
-pub use cascade::{aggregate, resolve_severe_labels, Cascade, CascadeVerdict, ClauseVerdict};
+// `severity_rank_weights` is re-exported alongside its sibling
+// `resolve_severe_labels` because its own docs instruct callers to echo the
+// resolved ranking at startup (naming `lfm2d` as the caller that needs it) —
+// a mitigation that wants the function reachable where callers already look.
+pub use cascade::{
+    aggregate, resolve_severe_labels, severity_rank_weights, Cascade, CascadeVerdict, ClauseVerdict,
+};
 pub use config::{EncoderArch, LayerType, Lfm2EncoderConfig};
 pub use colbert::{ColbertModel, MultiVector};
 pub use embedding::{cosine_similarity, Lfm2Embedding, TextKind};
