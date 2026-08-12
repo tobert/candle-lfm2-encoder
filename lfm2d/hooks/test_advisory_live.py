@@ -353,6 +353,46 @@ def test_known_vocabulary_still_classifies(_c):
     check('known vocabulary classifies normally', bucket == 'lfm2d_only', f'bucket={bucket}')
 
 
+def test_long_commands_still_get_a_verdict(_c):
+    """Regression: the first live run lost 4 of 14 rows to timeouts, and every
+    loss was a long command. That is not merely lossy, it is BIASED — the
+    dropped rows are the heredocs and quoted payloads where data-position
+    content lives, i.e. exactly what the advisory phase exists to measure.
+
+    Lengths chosen from the real failures: 1119, 1990 and 2840 characters."""
+    bad = []
+    for n in (500, 1200, 2000, 3000):
+        cmd = ('git commit -m "wip" && echo ok && ' * 200)[:n]
+        with tempfile.TemporaryDirectory() as d:
+            _, rows, wall = run_hook(cmd, Path(d))
+        v = rows[0]['lfm2d'] if rows else {}
+        if not v.get('ok'):
+            bad.append(f'len {n}: {v.get("error")} after {wall:.2f}s')
+    check('long commands still get a verdict', not bad, '; '.join(bad))
+
+
+def test_timeout_scales_with_command_length(_c):
+    """A flat budget is what caused the bias. Short commands must still fail
+    fast — that is what makes an outage detectable quickly."""
+    short, long_ = timeout_probe(50), timeout_probe(3000)
+    check('timeout scales with input length', short < 0.6 and long_ > 3.0,
+          f'50 chars -> {short:.2f}s, 3000 chars -> {long_:.2f}s')
+
+
+def timeout_probe(n: int) -> float:
+    """Ask the hook module itself what timeout it would use, so this tests the
+    real formula rather than a copy of it."""
+    out = subprocess.run(
+        [sys.executable, '-c',
+         f'import importlib.util,sys;'
+         f'spec=importlib.util.spec_from_file_location("h", "{HOOK}");'
+         f'm=importlib.util.module_from_spec(spec);spec.loader.exec_module(m);'
+         f'print(m.timeout_for("x"*{n}))'],
+        capture_output=True, text=True, timeout=30,
+    )
+    return float(out.stdout.strip())
+
+
 def test_breaker_opens_after_repeated_failures(_c):
     """An lfm2d outage must stop taxing every Bash call. Without the breaker,
     a black-holed host costs the full timeout forever (measured 447ms)."""
@@ -439,6 +479,8 @@ TESTS = [
     test_malformed_body_fails_open,
     test_unknown_label_vocabulary_is_loud,
     test_known_vocabulary_still_classifies,
+    test_long_commands_still_get_a_verdict,
+    test_timeout_scales_with_command_length,
     test_breaker_opens_after_repeated_failures,
     test_breaker_still_logs_while_open,
     test_breaker_never_changes_the_decision,

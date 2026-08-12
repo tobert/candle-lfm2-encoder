@@ -86,11 +86,42 @@ from typing import Optional
 # lfm2d advisory configuration
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 LFM2D_URL = os.environ.get('LFM2D_URL', 'http://lfm2d-1.taila4abc.ts.net:8088')
-# Measured 75 ms mean / 80 ms max over 5 calls to the live pod on 2026-08-12.
-# 400 ms is ~5x headroom: generous enough that a normal call never trips it,
-# tight enough that a wedged endpoint costs the session under half a second
-# per Bash call rather than hanging it.
-LFM2D_TIMEOUT_S = float(os.environ.get('LFM2D_HOOK_TIMEOUT', '0.4'))
+# Timeout scales with input length, because inference latency does.
+#
+# The first version was a flat 400 ms, picked from a 75 ms measurement of a
+# 29-character command. Real traffic killed it: 4 of the first 14 live rows
+# timed out, and every one was a long command. Re-measured against the pod,
+# the curve is linear and steep — ~65 ms fixed + ~0.37 ms per character:
+#
+#     46 chars   85 ms      1840 chars   604 ms
+#    184 chars  113 ms      3680 chars  1293 ms
+#    920 chars  318 ms      5520 chars  2112 ms
+#
+# A flat budget therefore doesn't just lose calls, it loses them
+# SELECTIVELY: the dropped ones are the long commands — heredocs, quoted
+# payloads, piped scripts — which are exactly where data-position content
+# lives and exactly the phenomenon this advisory phase exists to measure.
+# A sample biased against its own subject is worse than a smaller one.
+#
+# So: base + per-char, with ~3x margin over measured, capped. Short commands
+# still fail fast (the common case, and what makes an outage detectable),
+# long ones get the time they actually need. Affordable now only because the
+# circuit breaker below bounds what a dead service can cost overall.
+# Setting LFM2D_HOOK_TIMEOUT overrides the whole formula with a flat value.
+TIMEOUT_BASE_S = float(os.environ.get('LFM2D_TIMEOUT_BASE', '0.35'))
+TIMEOUT_PER_CHAR_S = float(os.environ.get('LFM2D_TIMEOUT_PER_CHAR', '0.0011'))
+TIMEOUT_CAP_S = float(os.environ.get('LFM2D_TIMEOUT_CAP', '5.0'))
+
+
+LFM2D_TIMEOUT_S = float(os.environ.get('LFM2D_HOOK_TIMEOUT', '0')) or None
+
+
+def timeout_for(cmd: str) -> float:
+    if LFM2D_TIMEOUT_S:
+        return LFM2D_TIMEOUT_S
+    return min(TIMEOUT_CAP_S, TIMEOUT_BASE_S + len(cmd) * TIMEOUT_PER_CHAR_S)
+
+
 # 'advisory' (default): lfm2d is recorded, regex decides. 'off': no call at
 # all. 'enforce': NOT READY — read the shortcomings above.
 LFM2D_MODE = os.environ.get('LFM2D_HOOK_MODE', 'advisory')
@@ -190,7 +221,7 @@ def lfm2d_classify(cmd: str) -> dict:
         method='POST',
     )
     try:
-        with urllib.request.urlopen(req, timeout=LFM2D_TIMEOUT_S) as resp:
+        with urllib.request.urlopen(req, timeout=timeout_for(cmd)) as resp:
             results = json.loads(resp.read())
         r = results[0]
         return {
