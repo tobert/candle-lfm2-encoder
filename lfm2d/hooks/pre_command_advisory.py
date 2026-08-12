@@ -49,11 +49,25 @@ OTHER KNOWN GAPS
   (informative / situation-normal / data-critical) cannot express it. The
   classifier is a candidate replacement for the rm/find SOFT_BLOCKED and
   WARNED half only. Do not expect it to ever own the git half.
-- No clause splitting yet. `a && b` goes to /v1/classify as one string,
-  even though /v1/cascade exists precisely to rank clauses within a
-  statement. Splitting a shell line correctly (quoting, subshells,
-  heredocs) is its own problem; naive splitting on && would break the very
-  data-position cases above by cutting inside a quoted payload.
+- Clause splitting IS wired (2026-08-12, clause_split.py): compound
+  commands go to /v1/cascade, which ranks clauses within the statement.
+  This is the fix for the measured dilution defect — `rm -rf -- "$d.venv"`
+  scores 0.540 alone and 0.047 inside its 624-char script (11x), and 92%
+  of real commands are compound. The splitter never cuts inside quotes,
+  substitutions, or heredoc bodies (the data-position hazard above), and
+  deliberately does NOT split pipelines: `cat f | grep 'git push --force'`
+  measured 0.994 informative whole, while a bare grep-for-pattern clause
+  is a shape v8 misreads (0.892 dc) — splitting pipes would manufacture
+  false positives out of currently-correct behaviour.
+  Cost, measured live on the deployed pod: cascade runs ~145 ms/clause
+  warm (~290 cold) because its forwards are per-clause, vs ~65 ms/clause
+  for batch /v1/classify — a daemon-side batching fix is noted in
+  exomemory issues. Until that deploys, the timeout carries a per-clause
+  term, and commands past CASCADE_MAX_CLAUSES (default 20; 32 clauses
+  measured 8.4 s, over any sane per-call budget) fall back to one batched
+  /v1/classify over the clauses: per-clause truth stays in the log, no
+  winner is invented client-side, and `_disagreement` handles those rows
+  as a set-membership check rather than a ranking.
 - Command text is sent to lfm2d over the tailnet (no auth) and written to a
   local JSONL. Commands can contain secrets. The log is 0600 and local, and
   the tailnet is Amy-ruled trusted, but this is a real exposure to weigh
@@ -81,6 +95,20 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 from typing import Optional
+
+# The splitter lives beside this file; the hook is invoked by absolute path
+# from settings.json, so make the import location explicit rather than
+# trusting whatever sys.path the caller left us.
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+try:
+    from clause_split import split_clauses
+    _SPLIT_IMPORT_ERROR = None
+except Exception as _e:  # the splitter must never be able to break the guard
+    _SPLIT_IMPORT_ERROR = f'{type(_e).__name__}: {_e}'
+
+    def split_clauses(cmd: str) -> list:
+        stripped = cmd.strip()
+        return [stripped] if stripped else []
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # lfm2d advisory configuration
@@ -110,16 +138,64 @@ LFM2D_URL = os.environ.get('LFM2D_URL', 'http://lfm2d-1.taila4abc.ts.net:8088')
 # Setting LFM2D_HOOK_TIMEOUT overrides the whole formula with a flat value.
 TIMEOUT_BASE_S = float(os.environ.get('LFM2D_TIMEOUT_BASE', '0.35'))
 TIMEOUT_PER_CHAR_S = float(os.environ.get('LFM2D_TIMEOUT_PER_CHAR', '0.0011'))
-TIMEOUT_CAP_S = float(os.environ.get('LFM2D_TIMEOUT_CAP', '5.0'))
+# Cap raised 5.0 -> 8.0 with clause splitting (2026-08-12): a 60-clause
+# batch classify measured >5 s on the live pod under load, and paying the
+# full cap to then LOSE the row is the worst of both worlds — the lost
+# rows would be exactly the most-diluted monster commands this instrument
+# exists to measure. Only the >CASCADE_MAX_CLAUSES batch path ever
+# approaches the cap; a median 3-clause command budgets ~1.9 s.
+TIMEOUT_CAP_S = float(os.environ.get('LFM2D_TIMEOUT_CAP', '8.0'))
 
 
 LFM2D_TIMEOUT_S = float(os.environ.get('LFM2D_HOOK_TIMEOUT', '0')) or None
+
+# /v1/cascade runs one classifier + one router forward PER CLAUSE (measured
+# live 2026-08-12: ~145 ms/clause warm, ~290 cold, vs ~65 ms/clause for
+# batch /v1/classify — the daemon does not batch cascade forwards yet), so
+# a cascade call's budget needs a per-clause term the way classify's needs
+# a per-char one. ~3x margin over warm. The shared cap still applies: a
+# 64-clause monster measured 12.4 s live, and no Bash call should stall
+# that long for an advisory opinion — past the cap it times out and the
+# log says so (endpoint + error visible), which beats both stalling and
+# silent truncation.
+TIMEOUT_PER_CLAUSE_S = float(os.environ.get('LFM2D_TIMEOUT_PER_CLAUSE', '0.45'))
+# Batch /v1/classify amortizes to ~65 ms/clause measured; 3x margin.
+TIMEOUT_PER_BATCH_ITEM_S = float(os.environ.get('LFM2D_TIMEOUT_PER_BATCH_ITEM', '0.2'))
+
+# Past this many clauses, cascade at deployed per-clause cost cannot finish
+# under the cap (32 clauses measured 8.4 s), and losing those rows to
+# timeouts would be SELECTIVE loss of the most-diluted commands — the very
+# population this instrument exists to measure. So monsters fall back to
+# one batched /v1/classify over the clauses (~65 ms/clause), keeping
+# per-clause truth in the log without the daemon-owned ranking. Raise this
+# once the daemon batches cascade forwards.
+CASCADE_MAX_CLAUSES = int(os.environ.get('LFM2D_CASCADE_MAX_CLAUSES', '20'))
 
 
 def timeout_for(cmd: str) -> float:
     if LFM2D_TIMEOUT_S:
         return LFM2D_TIMEOUT_S
     return min(TIMEOUT_CAP_S, TIMEOUT_BASE_S + len(cmd) * TIMEOUT_PER_CHAR_S)
+
+
+def cascade_timeout_for(clauses: list) -> float:
+    if LFM2D_TIMEOUT_S:
+        return LFM2D_TIMEOUT_S
+    chars = sum(len(c) for c in clauses)
+    return min(
+        TIMEOUT_CAP_S,
+        TIMEOUT_BASE_S + TIMEOUT_PER_CLAUSE_S * len(clauses) + chars * TIMEOUT_PER_CHAR_S,
+    )
+
+
+def batch_timeout_for(clauses: list) -> float:
+    if LFM2D_TIMEOUT_S:
+        return LFM2D_TIMEOUT_S
+    chars = sum(len(c) for c in clauses)
+    return min(
+        TIMEOUT_CAP_S,
+        TIMEOUT_BASE_S + TIMEOUT_PER_BATCH_ITEM_S * len(clauses) + chars * TIMEOUT_PER_CHAR_S,
+    )
 
 
 # 'advisory' (default): lfm2d is recorded, regex decides. 'off': no call at
@@ -241,6 +317,102 @@ def lfm2d_classify(cmd: str) -> dict:
         return {'ok': False, 'error': type(e).__name__, 'detail': str(e)[:200]}
 
 
+def lfm2d_cascade(clauses: list) -> dict:
+    """One /v1/cascade call over pre-split clauses. Same never-raises
+    contract as `lfm2d_classify`.
+
+    The returned dict carries `top` and `scores` at the SAME keys classify
+    rows use — `top` is the winning clause's argmax label, `scores` its
+    per-label probabilities — so `_disagreement` reads both row kinds
+    without caring which endpoint produced them. The vocabulary check rides
+    on `scores` exactly as before. Everything cascade-specific (winner,
+    per-clause breakdown, lane) is additional fields, `endpoint` names
+    which contract the row speaks.
+    """
+    started = time.monotonic()
+    body = json.dumps({'clauses': clauses}).encode()
+    req = urllib.request.Request(
+        f'{LFM2D_URL}/v1/cascade',
+        data=body,
+        headers={'content-type': 'application/json'},
+        method='POST',
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=cascade_timeout_for(clauses)) as resp:
+            r = json.loads(resp.read())
+        winner = r['winner']
+        rows = r['clauses']
+        models = r.get('models') or []
+        # models[0] is the classifier by the server's contract
+        # (engine_real.rs assembles [classifier, router]); keep the full
+        # array too so the row never loses the router's identity.
+        clf = models[0] if models else {}
+        return {
+            'ok': True,
+            'endpoint': 'cascade',
+            'top': rows[winner['index']]['top_severity'],
+            'scores': winner['severity_scores'],
+            'winner_index': winner['index'],
+            'winner_clause': winner['clause'],
+            'clause_count': len(clauses),
+            'clauses': [
+                {'clause': c['clause'], 'top': c['top_severity'], 'scores': c['severity_scores']}
+                for c in rows
+            ],
+            'lane': r.get('lane'),
+            'model_id': clf.get('model_id'),
+            'weight_hash': clf.get('weight_hash'),
+            'models': models,
+            'latency_ms': round((time.monotonic() - started) * 1000, 1),
+        }
+    except urllib.error.HTTPError as e:
+        return {'ok': False, 'endpoint': 'cascade', 'error': f'http {e.code}',
+                'detail': e.read()[:200].decode('utf-8', 'replace')}
+    except Exception as e:  # timeout, DNS, connection refused, malformed body
+        return {'ok': False, 'endpoint': 'cascade', 'error': type(e).__name__, 'detail': str(e)[:200]}
+
+
+def lfm2d_classify_batch(clauses: list) -> dict:
+    """One batched /v1/classify over pre-split clauses — the fallback for
+    commands with more clauses than cascade can serve under the cap.
+
+    Deliberately carries NO row-level `top`/`scores` and NO winner: picking
+    one clause to represent the command IS the severity aggregation, and
+    that belongs to the daemon (`ordinal-collapsed-to-a-set` is the memory
+    this respects). `_disagreement` handles these rows explicitly with a
+    set-membership check — did ANY clause's argmax land in the severe set —
+    which is a recall question, not a ranking."""
+    started = time.monotonic()
+    body = json.dumps({'inputs': clauses}).encode()
+    req = urllib.request.Request(
+        f'{LFM2D_URL}/v1/classify',
+        data=body,
+        headers={'content-type': 'application/json'},
+        method='POST',
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=batch_timeout_for(clauses)) as resp:
+            results = json.loads(resp.read())
+        first = results[0] if results else {}
+        return {
+            'ok': True,
+            'endpoint': 'classify_batch',
+            'clause_count': len(clauses),
+            'clauses': [
+                {'clause': cl, 'top': r['top'], 'scores': r['scores']}
+                for cl, r in zip(clauses, results)
+            ],
+            'model_id': first.get('model_id'),
+            'weight_hash': first.get('weight_hash'),
+            'latency_ms': round((time.monotonic() - started) * 1000, 1),
+        }
+    except urllib.error.HTTPError as e:
+        return {'ok': False, 'endpoint': 'classify_batch', 'error': f'http {e.code}',
+                'detail': e.read()[:200].decode('utf-8', 'replace')}
+    except Exception as e:  # timeout, DNS, connection refused, malformed body
+        return {'ok': False, 'endpoint': 'classify_batch', 'error': type(e).__name__, 'detail': str(e)[:200]}
+
+
 def breaker_read() -> dict:
     try:
         return json.loads(BREAKER_STATE.read_text())
@@ -317,13 +489,23 @@ def _disagreement(regex_verdict: dict, lfm2d_verdict: dict) -> str:  # noqa: C90
     if not lfm2d_verdict.get('ok'):
         return 'circuit_open' if lfm2d_verdict.get('error') == 'circuit_open' else 'no_verdict'
 
-    scores = lfm2d_verdict.get('scores') or {}
-    known = [l for l in SEVERE_LABELS if l in scores]
-    if not known:
-        return 'vocab_mismatch'
+    if lfm2d_verdict.get('endpoint') == 'classify_batch':
+        # No winner exists on these rows by design (see lfm2d_classify_batch)
+        # — flagging is set-membership over per-clause argmaxes, not ranking.
+        clause_rows = lfm2d_verdict.get('clauses') or []
+        known = [l for l in SEVERE_LABELS
+                 if any(l in (c.get('scores') or {}) for c in clause_rows)]
+        if not known:
+            return 'vocab_mismatch'
+        lfm2d_flagged = any(c.get('top') in known for c in clause_rows)
+    else:
+        scores = lfm2d_verdict.get('scores') or {}
+        known = [l for l in SEVERE_LABELS if l in scores]
+        if not known:
+            return 'vocab_mismatch'
+        lfm2d_flagged = lfm2d_verdict['top'] in known
 
     regex_flagged = regex_verdict['decision'] in ('deny', 'soft_deny', 'warn')
-    lfm2d_flagged = lfm2d_verdict['top'] in known
     if regex_flagged and lfm2d_flagged:
         return 'agree_flag'
     if not regex_flagged and not lfm2d_flagged:
@@ -469,7 +651,24 @@ def main():
             lfm2d = {'ok': False, 'error': 'circuit_open',
                      'detail': f'{BREAKER_THRESHOLD}+ consecutive failures; not retrying yet'}
         else:
-            lfm2d = lfm2d_classify(cmd)
+            # Compound commands go to /v1/cascade so the severe clause is
+            # ranked instead of diluted; a single clause (possibly cleaned
+            # of comments/keywords by the splitter) goes to /v1/classify.
+            clauses = split_clauses(cmd)
+            if len(clauses) > CASCADE_MAX_CLAUSES:
+                lfm2d = lfm2d_classify_batch(clauses)
+            elif len(clauses) >= 2:
+                lfm2d = lfm2d_cascade(clauses)
+            else:
+                sent = clauses[0] if clauses else cmd
+                lfm2d = lfm2d_classify(sent)
+                lfm2d['endpoint'] = 'classify'
+                if sent != cmd:
+                    # The splitter stripped comments/keywords; record what
+                    # was actually scored so the row can't mislead analysis.
+                    lfm2d['sent'] = sent
+            if _SPLIT_IMPORT_ERROR:
+                lfm2d['split_import_error'] = _SPLIT_IMPORT_ERROR
             breaker_record(lfm2d.get('ok', False))
         log_advisory(cmd, verdict, lfm2d)
 

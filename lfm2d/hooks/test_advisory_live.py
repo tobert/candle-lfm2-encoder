@@ -136,6 +136,24 @@ def v6_response():
     }]
 
 
+def v6_cascade_response():
+    """The same rollback case, but cascade-shaped — compound commands take
+    the /v1/cascade path now, so the vocabulary guard must hold there too."""
+    scores = {'informative': 0.01, 'mutating': 0.02, 'destructive': 0.97}
+    return {
+        'winner': {'index': 1, 'clause': 'rm -rf ./x', 'severity_scores': scores},
+        'lane': {'route': 'destructive-lane', 'cosine': 0.5},
+        'clauses': [
+            {'index': 0, 'clause': 'cd /tmp', 'severity_scores': scores, 'top_severity': 'informative'},
+            {'index': 1, 'clause': 'rm -rf ./x', 'severity_scores': scores, 'top_severity': 'destructive'},
+        ],
+        'models': [
+            {'model_id': 'kube_ordinal_v6', 'weight_hash': 'cafebabe' * 8},
+            {'model_id': 'router', 'weight_hash': 'beefcafe' * 8},
+        ],
+    }
+
+
 # ────────────────────────────────────────────────────────────── preflight ────
 def preflight() -> dict:
     try:
@@ -279,6 +297,57 @@ def test_live_latency_is_bounded(_c):
           f'worst {worst*1000:.0f}ms of {[f"{w*1000:.0f}" for w in walls]}')
 
 
+def test_compound_command_takes_the_cascade_path(c):
+    """Compound commands must reach /v1/cascade — whole-command classify is
+    the distorted instrument (11x dilution, measured). The row must carry
+    the winner, the per-clause breakdown, and the CLASSIFIER's audit pair
+    (models[0] by the server's contract), or the log can't be analyzed
+    across a redeploy."""
+    with tempfile.TemporaryDirectory() as d:
+        _, rows, _ = run_hook('cd /tmp && rm -rf ./build', Path(d))
+    if not rows:
+        return check('compound command takes the cascade path', False, 'no row written')
+    v = rows[0]['lfm2d']
+    ok = (v.get('ok') and v.get('endpoint') == 'cascade'
+          and v.get('clause_count') == 2 and len(v.get('clauses', [])) == 2
+          and 'winner_clause' in v and 'winner_index' in v
+          and v.get('model_id') == c['id'] and v.get('weight_hash') == c['weight_hash'])
+    check('compound command takes the cascade path', bool(ok), f'row={v}')
+
+
+def test_cascade_winner_is_the_severe_clause(_c):
+    """The dilution fixture, live, in miniature: a destructive clause inside
+    a loop must WIN the in-statement ranking instead of being averaged away.
+    Characterization against the deployed checkpoint — measured 2026-08-12,
+    the rm clause scored 0.540 alone vs 0.047 diluted into its script."""
+    cmd = 'for d in worktree-a worktree-b; do\n  echo "cleaning $d"\n  rm -rf -- "$d.venv"\ndone'
+    with tempfile.TemporaryDirectory() as d:
+        _, rows, _ = run_hook(cmd, Path(d))
+    if not rows or not rows[0]['lfm2d'].get('ok'):
+        return check('cascade winner is the severe clause', False,
+                      f'row={rows[0]["lfm2d"] if rows else None}')
+    v = rows[0]['lfm2d']
+    ok = v['endpoint'] == 'cascade' and v['winner_clause'].startswith('rm -rf')
+    check('cascade winner is the severe clause', ok,
+          f"winner={v.get('winner_clause')!r} of {v.get('clause_count')} clauses")
+
+
+def test_quoted_payload_is_not_split(_c):
+    """The named hazard: a curl whose JSON body contains `rm -rf && …` must
+    reach the classifier as ONE clause. Cutting inside the payload would
+    fabricate a bare `rm -rf` out of data — the exact discrimination this
+    product exists to make."""
+    cmd = 'curl -s -X POST http://h/v1/classify -d \'{"inputs":"rm -rf /var/lib/data && echo done"}\''
+    with tempfile.TemporaryDirectory() as d:
+        _, rows, _ = run_hook(cmd, Path(d))
+    if not rows:
+        return check('quoted payload is not split', False, 'no row written')
+    v = rows[0]['lfm2d']
+    ok = v.get('ok') and v.get('endpoint') == 'classify'
+    check('quoted payload is not split', bool(ok),
+          f"endpoint={v.get('endpoint')} (want classify: 1 clause)")
+
+
 # ── stub-backed: paths a healthy daemon cannot produce on demand ──────────
 def test_unreachable_lfm2d_fails_open_and_says_so(_c):
     with tempfile.TemporaryDirectory() as d:
@@ -351,6 +420,31 @@ def test_known_vocabulary_still_classifies(_c):
             _, rows, _ = run_hook('ls -la /home', Path(d), {'LFM2D_URL': url})
     bucket = rows[0]['disagree'] if rows else 'NO ROW'
     check('known vocabulary classifies normally', bucket == 'lfm2d_only', f'bucket={bucket}')
+
+
+def test_unknown_vocabulary_is_loud_on_the_cascade_path(_c):
+    """Same rollback guard, cascade shape: a compound command's winner
+    speaking v6's labels must bucket vocab_mismatch, not silently clear."""
+    with stub_lfm2d(v6_cascade_response()) as url:
+        with tempfile.TemporaryDirectory() as d:
+            dec, rows, _ = run_hook('cd /tmp && echo hi', Path(d), {'LFM2D_URL': url})
+    allowed = 'permissionDecision' in dec.get('hookSpecificOutput', {})
+    bucket = rows[0]['disagree'] if rows else 'NO ROW'
+    check('unknown vocabulary is loud on the cascade path',
+          allowed and bucket == 'vocab_mismatch',
+          f"bucket={bucket!r}; row={rows[0]['lfm2d'] if rows else None}")
+
+
+def test_cascade_http_error_fails_open(_c):
+    """The cascade path's failure modes must degrade exactly like classify's:
+    fail open, reason recorded, endpoint named."""
+    with stub_lfm2d({'error': {'message': 'boom', 'type': 'internal'}}, status=500) as url:
+        with tempfile.TemporaryDirectory() as d:
+            dec, rows, _ = run_hook('cd /tmp && echo hi', Path(d), {'LFM2D_URL': url})
+    allowed = dec.get('hookSpecificOutput', {}).get('permissionDecision') == 'allow'
+    v = rows[0]['lfm2d'] if rows else {}
+    ok = allowed and v.get('error', '').startswith('http 500') and v.get('endpoint') == 'cascade'
+    check('cascade http 500 fails open, endpoint named', ok, f'row={v}')
 
 
 def test_long_commands_still_get_a_verdict(_c):
@@ -473,12 +567,17 @@ TESTS = [
     test_approved_retry_does_not_reach_lfm2d,
     test_log_is_not_world_readable,
     test_live_latency_is_bounded,
+    test_compound_command_takes_the_cascade_path,
+    test_cascade_winner_is_the_severe_clause,
+    test_quoted_payload_is_not_split,
     test_unreachable_lfm2d_fails_open_and_says_so,
     test_timeout_is_honored,
     test_http_error_fails_open,
     test_malformed_body_fails_open,
     test_unknown_label_vocabulary_is_loud,
     test_known_vocabulary_still_classifies,
+    test_unknown_vocabulary_is_loud_on_the_cascade_path,
+    test_cascade_http_error_fails_open,
     test_long_commands_still_get_a_verdict,
     test_timeout_scales_with_command_length,
     test_breaker_opens_after_repeated_failures,
