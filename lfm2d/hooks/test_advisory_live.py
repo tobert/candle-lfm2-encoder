@@ -1,0 +1,393 @@
+#!/usr/bin/env python3
+"""Integration tests for the advisory hook. REQUIRES a reachable lfm2d.
+
+Run:  python3 lfm2d/hooks/test_advisory_live.py
+      LFM2D_URL=http://host:8088 python3 lfm2d/hooks/test_advisory_live.py
+
+Fails loudly rather than skipping when lfm2d is unreachable. A guard-rail
+suite that quietly turns into a no-op is worse than no suite: it reports
+green while testing nothing, which is the failure mode this project keeps
+writing memories about.
+
+Two kinds of test here, and the split is deliberate:
+
+  LIVE    — against the real daemon. These are the ones that can catch
+            "the contract changed under us."
+  STUB    — against a local HTTP stub we control. These cover the paths a
+            healthy daemon cannot produce on demand: a different label
+            vocabulary, a malformed body, a hang. You cannot test a
+            checkpoint rollback by asking production to roll back.
+
+`test_parity.py` covers the regex half offline. This file covers what
+happens once lfm2d is in the loop.
+"""
+import json
+import os
+import subprocess
+import sys
+import tempfile
+import threading
+import time
+import urllib.request
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
+
+HERE = Path(__file__).resolve().parent
+HOOK = HERE / 'pre_command_advisory.py'
+LFM2D_URL = os.environ.get('LFM2D_URL', 'http://lfm2d-1.taila4abc.ts.net:8088')
+
+PASS, FAIL = [], []
+
+
+def check(name: str, ok: bool, detail: str = ''):
+    (PASS if ok else FAIL).append(name)
+    print(f"  {'ok  ' if ok else 'FAIL'}  {name}")
+    if detail and not ok:
+        print(f"        {detail}")
+
+
+# ─────────────────────────────────────────────────────────────── harness ────
+def run_hook(command: str, cache: Path, env_extra: dict = None, tool: str = 'Bash') -> tuple:
+    """Run the hook once. Returns (decision-dict, log-rows-written, wall_seconds)."""
+    payload = (
+        {'tool_name': tool, 'tool_input': {'command': command}}
+        if tool == 'Bash'
+        else {'tool_name': tool, 'tool_input': {'file_path': command}}
+    )
+    env = dict(os.environ)
+    env['XDG_CACHE_HOME'] = str(cache)
+    env['LFM2D_URL'] = LFM2D_URL
+    env.pop('LFM2D_HOOK_MODE', None)
+    env.pop('LFM2D_HOOK_TIMEOUT', None)
+    env.update(env_extra or {})
+
+    log = cache / 'claude-hooks' / 'lfm2d-advisory.jsonl'
+    before = log.read_text().count('\n') if log.exists() else 0
+
+    started = time.monotonic()
+    p = subprocess.run(
+        [sys.executable, str(HOOK)], input=json.dumps(payload),
+        capture_output=True, text=True, timeout=60, env=env,
+    )
+    wall = time.monotonic() - started
+
+    rows = []
+    if log.exists():
+        rows = [json.loads(l) for l in log.read_text().splitlines() if l.strip()][before:]
+    try:
+        decision = json.loads(p.stdout)
+    except json.JSONDecodeError:
+        decision = {'__unparseable__': p.stdout, '__stderr__': p.stderr}
+    return decision, rows, wall
+
+
+class StubHandler(BaseHTTPRequestHandler):
+    """Serves whatever `ThreadingHTTPServer.scripted` says. Silent."""
+
+    def do_POST(self):
+        body, status = self.server.scripted
+        if body is None:  # simulate a hang
+            time.sleep(5)
+            return
+        raw = json.dumps(body).encode() if not isinstance(body, bytes) else body
+        self.send_response(status)
+        self.send_header('content-type', 'application/json')
+        self.send_header('content-length', str(len(raw)))
+        self.end_headers()
+        self.wfile.write(raw)
+
+    def log_message(self, *a):
+        pass
+
+
+class stub_lfm2d:
+    """Context manager: a local stand-in for lfm2d returning a scripted body."""
+
+    def __init__(self, body, status=200):
+        self.body, self.status = body, status
+
+    def __enter__(self):
+        self.srv = ThreadingHTTPServer(('127.0.0.1', 0), StubHandler)
+        self.srv.scripted = (self.body, self.status)
+        threading.Thread(target=self.srv.serve_forever, daemon=True).start()
+        return f'http://127.0.0.1:{self.srv.server_address[1]}'
+
+    def __exit__(self, *a):
+        self.srv.shutdown()
+
+
+def v8_response(top='data-critical'):
+    return [{
+        'scores': {'informative': 0.01, 'situation-normal': 0.02, 'data-critical': 0.97},
+        'top': top,
+        'model_id': 'kube_ordinal_v8',
+        'weight_hash': 'deadbeef' * 8,
+    }]
+
+
+def v6_response():
+    """A DIFFERENT checkpoint's vocabulary — v6 spoke informative/mutating/
+    destructive. This is the rollback case fleet.md warns about."""
+    return [{
+        'scores': {'informative': 0.01, 'mutating': 0.02, 'destructive': 0.97},
+        'top': 'destructive',
+        'model_id': 'kube_ordinal_v6',
+        'weight_hash': 'cafebabe' * 8,
+    }]
+
+
+# ────────────────────────────────────────────────────────────── preflight ────
+def preflight() -> dict:
+    try:
+        with urllib.request.urlopen(f'{LFM2D_URL}/v1/models', timeout=10) as r:
+            models = json.loads(r.read())
+    except Exception as e:
+        print(f"\nCANNOT RUN: lfm2d unreachable at {LFM2D_URL} ({type(e).__name__}: {e})")
+        print("These tests require a running lfm2d. Set LFM2D_URL, or start the daemon.")
+        print("Refusing to skip — a guard-rail suite that silently no-ops reports")
+        print("green while testing nothing.")
+        sys.exit(2)
+
+    classifiers = [m for m in models if m['kind'] == 'classifier']
+    if not classifiers:
+        print(f"\nCANNOT RUN: {LFM2D_URL} has no classifier head loaded.")
+        print(f"Loaded: {[(m['id'], m['kind']) for m in models]}")
+        sys.exit(2)
+    c = classifiers[0]
+    print(f"lfm2d:      {LFM2D_URL}")
+    print(f"classifier: {c['id']} {c['weight_hash'][:12]}… labels={c.get('labels')}\n")
+    return c
+
+
+# ────────────────────────────────────────────────────────────────── tests ────
+def test_advisory_never_changes_the_decision(_c):
+    """THE invariant. Advisory means advisory: for every command, the decision
+    with lfm2d in the loop must equal the decision with it switched off."""
+    cases = [
+        'ls -la /home', 'npm install', 'cd db/migrations',
+        'git add -A', 'git stash push -m x', 'git commit -am wip',
+        'git push --force origin main', 'git reset --hard origin/main',
+        'find . -name "*.tmp" -exec echo {} ;',
+        'kubectl delete namespace prod', 'rm -r ./build', 'rm -f ./file',
+        'curl -s -X POST http://h/v1/classify -d \'{"inputs":"danger"}\'',
+        '', 'set -e\necho done',
+    ]
+    bad = []
+    for cmd in cases:
+        with tempfile.TemporaryDirectory() as a, tempfile.TemporaryDirectory() as b:
+            off, _, _ = run_hook(cmd, Path(a), {'LFM2D_HOOK_MODE': 'off'})
+            adv, _, _ = run_hook(cmd, Path(b), {'LFM2D_HOOK_MODE': 'advisory'})
+        if off != adv:
+            bad.append((cmd, off, adv))
+    check('advisory never changes the decision', not bad,
+          f"{len(bad)} differ, first: {bad[0] if bad else ''}")
+
+
+def test_every_bash_call_logs_one_row(_c):
+    with tempfile.TemporaryDirectory() as d:
+        _, rows, _ = run_hook('ls -la /home', Path(d))
+        check('one log row per Bash call', len(rows) == 1, f'got {len(rows)}')
+
+
+def test_log_row_carries_the_audit_pair(c):
+    """A verdict without the weight hash it came from cannot be compared
+    across a redeploy — and comparing across redeploys is what this log is
+    for. Must match the deployed classifier, not merely be present."""
+    with tempfile.TemporaryDirectory() as d:
+        _, rows, _ = run_hook('kubectl delete namespace prod', Path(d))
+    if not rows:
+        return check('log row carries the audit pair', False, 'no row written')
+    v = rows[0]['lfm2d']
+    ok = v.get('ok') and v.get('model_id') == c['id'] and v.get('weight_hash') == c['weight_hash']
+    check('log row carries the audit pair', ok,
+          f"got model_id={v.get('model_id')} hash={str(v.get('weight_hash'))[:12]}… "
+          f"want {c['id']} {c['weight_hash'][:12]}…")
+
+
+def test_log_row_is_complete(_c):
+    with tempfile.TemporaryDirectory() as d:
+        _, rows, _ = run_hook('rm -rf ./build', Path(d))
+    if not rows:
+        return check('log row is complete', False, 'no row written')
+    r = rows[0]
+    missing = [k for k in ('ts', 'cwd', 'command', 'regex', 'lfm2d', 'disagree') if k not in r]
+    ok = not missing and r['command'] == 'rm -rf ./build' and 'latency_ms' in r['lfm2d']
+    check('log row is complete', ok, f'missing={missing} row={r}')
+
+
+def test_disagreement_buckets_are_right(_c):
+    """Characterization test against the DEPLOYED checkpoint. If this fails
+    after a model change, that is the signal working — read the new numbers
+    before editing the expectations."""
+    expected = {
+        'ls -la /home': 'agree_clear',
+        'rm -rf /var/lib/data': 'agree_flag',
+        'kubectl delete namespace prod': 'lfm2d_only',
+    }
+    bad = []
+    for cmd, want in expected.items():
+        with tempfile.TemporaryDirectory() as d:
+            _, rows, _ = run_hook(cmd, Path(d))
+        got = rows[0]['disagree'] if rows else 'NO ROW'
+        if got != want:
+            bad.append(f'{cmd!r}: want {want}, got {got}')
+    check('disagreement buckets match the deployed model', not bad, '; '.join(bad))
+
+
+def test_non_bash_does_not_reach_lfm2d(_c):
+    """Read/Write/Edit inputs are file paths and file contents. Sending them
+    to a network service — and writing them to the advisory log — would widen
+    this hook's data exposure far past the Bash commands it exists to judge."""
+    bad = []
+    for tool in ('Read', 'Write', 'Edit'):
+        with tempfile.TemporaryDirectory() as d:
+            _, rows, _ = run_hook('/etc/shadow', Path(d), tool=tool)
+        if rows:
+            bad.append(f'{tool} wrote {len(rows)} row(s)')
+    check('non-Bash tools never reach lfm2d', not bad, '; '.join(bad))
+
+
+def test_approved_retry_does_not_reach_lfm2d(_c):
+    """The user has already ruled on this exact command. A model opinion on a
+    settled question is noise, and it costs a round trip on the retry path."""
+    with tempfile.TemporaryDirectory() as d:
+        cache = Path(d)
+        cmd = 'rm -rf ./build'
+        run_hook(cmd, cache)              # first call soft-denies and caches
+        _, rows, _ = run_hook(cmd, cache)  # retry consumes the approval
+    check('approved retry does not reach lfm2d', len(rows) == 0, f'{len(rows)} row(s)')
+
+
+def test_log_is_not_world_readable(_c):
+    with tempfile.TemporaryDirectory() as d:
+        run_hook('echo hi', Path(d))
+        log = Path(d) / 'claude-hooks' / 'lfm2d-advisory.jsonl'
+        mode = log.stat().st_mode & 0o777
+    check('advisory log is 0600', mode == 0o600, f'mode={oct(mode)}')
+
+
+def test_live_latency_is_bounded(_c):
+    """Every Bash call in every session pays this. Generous bound — this is a
+    smoke alarm for 'the endpoint got slow', not a benchmark."""
+    walls = []
+    for _ in range(5):
+        with tempfile.TemporaryDirectory() as d:
+            _, _, w = run_hook('kubectl delete namespace prod', Path(d))
+            walls.append(w)
+    worst = max(walls)
+    check('live hook latency under 2s', worst < 2.0,
+          f'worst {worst*1000:.0f}ms of {[f"{w*1000:.0f}" for w in walls]}')
+
+
+# ── stub-backed: paths a healthy daemon cannot produce on demand ──────────
+def test_unreachable_lfm2d_fails_open_and_says_so(_c):
+    with tempfile.TemporaryDirectory() as d:
+        dec, rows, _ = run_hook('ls -la /home', Path(d), {'LFM2D_URL': 'http://127.0.0.1:9'})
+    allowed = dec.get('hookSpecificOutput', {}).get('permissionDecision') == 'allow'
+    logged = rows and rows[0]['disagree'] == 'no_verdict' and rows[0]['lfm2d'].get('error')
+    check('unreachable lfm2d fails open, with the reason recorded', allowed and logged,
+          f'decision={dec} row={rows[0] if rows else None}')
+
+
+def test_timeout_is_honored(_c):
+    """A wedged endpoint must cost the session a bounded wait, not a hang."""
+    with stub_lfm2d(None) as url:  # handler sleeps 5s
+        with tempfile.TemporaryDirectory() as d:
+            dec, rows, wall = run_hook(
+                'ls -la /home', Path(d), {'LFM2D_URL': url, 'LFM2D_HOOK_TIMEOUT': '0.2'})
+    allowed = dec.get('hookSpecificOutput', {}).get('permissionDecision') == 'allow'
+    timed_out = rows and rows[0]['lfm2d'].get('error') in ('TimeoutError', 'URLError', 'timeout')
+    check('timeout is honored and fails open', allowed and timed_out and wall < 3.0,
+          f'wall={wall:.2f}s decision={dec} row={rows[0]["lfm2d"] if rows else None}')
+
+
+def test_http_error_fails_open(_c):
+    with stub_lfm2d({'error': {'message': 'boom', 'type': 'internal'}}, status=500) as url:
+        with tempfile.TemporaryDirectory() as d:
+            dec, rows, _ = run_hook('ls -la /home', Path(d), {'LFM2D_URL': url})
+    allowed = dec.get('hookSpecificOutput', {}).get('permissionDecision') == 'allow'
+    logged = rows and rows[0]['lfm2d'].get('error', '').startswith('http 500')
+    check('http 500 fails open, with the reason recorded', allowed and logged,
+          f'row={rows[0]["lfm2d"] if rows else None}')
+
+
+def test_malformed_body_fails_open(_c):
+    with stub_lfm2d(b'not json at all') as url:
+        with tempfile.TemporaryDirectory() as d:
+            dec, rows, _ = run_hook('ls -la /home', Path(d), {'LFM2D_URL': url})
+    allowed = dec.get('hookSpecificOutput', {}).get('permissionDecision') == 'allow'
+    logged = rows and not rows[0]['lfm2d'].get('ok')
+    check('malformed response fails open', allowed and logged, f'rows={rows}')
+
+
+def test_unknown_label_vocabulary_is_loud(_c):
+    """fleet.md: "Label vocabularies change between checkpoints — consumers
+    MUST read labels at runtime; hard-coded label strings are a live
+    breakage."
+
+    A rollback to v6 (informative/mutating/destructive) must NOT silently
+    bucket every command as agree_clear just because the string
+    'data-critical' stops appearing. That would report "the model sees
+    nothing severe" for an entire deployment — a silent wrong answer, which
+    is the one thing this project refuses.
+
+    Every /v1/classify response carries the full label set in `scores`, so
+    this is checkable per call with no extra round trip.
+    """
+    with stub_lfm2d(v6_response()) as url:
+        with tempfile.TemporaryDirectory() as d:
+            dec, rows, _ = run_hook('rm -rf /var/lib/data', Path(d), {'LFM2D_URL': url})
+    allowed = 'permissionDecision' in dec.get('hookSpecificOutput', {})
+    bucket = rows[0]['disagree'] if rows else 'NO ROW'
+    check('unknown label vocabulary is reported, not silently cleared',
+          allowed and bucket == 'vocab_mismatch',
+          f"bucket={bucket!r} (want 'vocab_mismatch'); row={rows[0]['lfm2d'] if rows else None}")
+
+
+def test_known_vocabulary_still_classifies(_c):
+    """The guard above must not fire on the deployed vocabulary."""
+    with stub_lfm2d(v8_response()) as url:
+        with tempfile.TemporaryDirectory() as d:
+            _, rows, _ = run_hook('ls -la /home', Path(d), {'LFM2D_URL': url})
+    bucket = rows[0]['disagree'] if rows else 'NO ROW'
+    check('known vocabulary classifies normally', bucket == 'lfm2d_only', f'bucket={bucket}')
+
+
+TESTS = [
+    test_advisory_never_changes_the_decision,
+    test_every_bash_call_logs_one_row,
+    test_log_row_carries_the_audit_pair,
+    test_log_row_is_complete,
+    test_disagreement_buckets_are_right,
+    test_non_bash_does_not_reach_lfm2d,
+    test_approved_retry_does_not_reach_lfm2d,
+    test_log_is_not_world_readable,
+    test_live_latency_is_bounded,
+    test_unreachable_lfm2d_fails_open_and_says_so,
+    test_timeout_is_honored,
+    test_http_error_fails_open,
+    test_malformed_body_fails_open,
+    test_unknown_label_vocabulary_is_loud,
+    test_known_vocabulary_still_classifies,
+]
+
+
+def main() -> int:
+    classifier = preflight()
+    for t in TESTS:
+        try:
+            t(classifier)
+        except Exception as e:
+            check(t.__name__, False, f'{type(e).__name__}: {e}')
+    print()
+    if FAIL:
+        print(f"FAILED: {len(FAIL)} of {len(PASS) + len(FAIL)}")
+        for n in FAIL:
+            print(f"  - {n}")
+        return 1
+    print(f"OK: {len(PASS)} tests passed")
+    return 0
+
+
+if __name__ == '__main__':
+    sys.exit(main())

@@ -58,6 +58,12 @@ OTHER KNOWN GAPS
   local JSONL. Commands can contain secrets. The log is 0600 and local, and
   the tailnet is Amy-ruled trusted, but this is a real exposure to weigh
   before this runs in every session on every machine.
+- Label vocabulary is checked per call, not assumed. `SEVERE_LABELS` is what
+  the disagreement buckets key on, and if the deployed checkpoint doesn't
+  speak any of them the row is bucketed `vocab_mismatch` rather than silently
+  counted as "the model saw nothing." Caught by a test, after shipping the
+  bug: the first version compared against a hard-coded 'data-critical', so a
+  rollback to v6 would have logged every `destructive` verdict as unflagged.
 - Fail-open on any lfm2d error. In advisory mode that is correct and
   invisible-by-design (the regex was always going to decide). In enforce
   mode fail-open would be a silent downgrade to regex behaviour, which is
@@ -88,6 +94,17 @@ LFM2D_TIMEOUT_S = float(os.environ.get('LFM2D_HOOK_TIMEOUT', '0.4'))
 # 'advisory' (default): lfm2d is recorded, regex decides. 'off': no call at
 # all. 'enforce': NOT READY — read the shortcomings above.
 LFM2D_MODE = os.environ.get('LFM2D_HOOK_MODE', 'advisory')
+# Which of the checkpoint's labels count as "the model flagged this", for the
+# disagreement buckets only — this decides nothing, it labels rows.
+#
+# Configurable because the vocabulary is a property of the DEPLOYED
+# checkpoint, not of this file: v8 speaks data-critical, v6 spoke
+# destructive. The default matches what is deployed today; when it stops
+# matching, `_disagreement` reports `vocab_mismatch` instead of quietly
+# treating every verdict as unflagged.
+SEVERE_LABELS = [
+    l.strip() for l in os.environ.get('LFM2D_SEVERE_LABELS', 'data-critical').split(',') if l.strip()
+]
 
 CACHE_DIR = Path(os.environ.get('XDG_CACHE_HOME', Path.home() / '.cache')) / 'claude-hooks'
 SOFT_BLOCK_CACHE = CACHE_DIR / 'soft-blocked.jsonl'
@@ -202,10 +219,30 @@ def log_advisory(cmd: str, regex_verdict: dict, lfm2d_verdict: dict):
 
 
 def _disagreement(regex_verdict: dict, lfm2d_verdict: dict) -> str:
+    """Bucket one comparison. Returns 'vocab_mismatch' rather than guessing
+    when the checkpoint doesn't speak the labels we're keying on.
+
+    fleet.md: "Label vocabularies change between checkpoints — consumers MUST
+    read labels at runtime; hard-coded label strings are a live breakage."
+    Comparing `top` against a fixed string is exactly that. Roll the pod back
+    to v6 (informative/mutating/destructive) and every `destructive` verdict
+    silently buckets as "the model did not flag it" — an entire deployment of
+    confidently wrong rows, with nothing in the log to say so.
+
+    No extra round trip is needed to avoid it: every /v1/classify response
+    carries the checkpoint's full label set in `scores`, so the vocabulary is
+    already in hand on every call.
+    """
     if not lfm2d_verdict.get('ok'):
         return 'no_verdict'
+
+    scores = lfm2d_verdict.get('scores') or {}
+    known = [l for l in SEVERE_LABELS if l in scores]
+    if not known:
+        return 'vocab_mismatch'
+
     regex_flagged = regex_verdict['decision'] in ('deny', 'soft_deny', 'warn')
-    lfm2d_flagged = lfm2d_verdict['top'] == 'data-critical'
+    lfm2d_flagged = lfm2d_verdict['top'] in known
     if regex_flagged and lfm2d_flagged:
         return 'agree_flag'
     if not regex_flagged and not lfm2d_flagged:
