@@ -195,6 +195,23 @@ pub fn meter() -> opentelemetry::metrics::Meter {
     global::meter("lfm2d")
 }
 
+/// Duration instrument names. **The unit is NOT part of the name** — it is
+/// carried by `.with_unit("ms")`, and exporters append it themselves.
+///
+/// These used to be `lfm2d.request.duration_ms`, which the Prometheus
+/// exporter turned into `lfm2d_request_duration_ms_milliseconds_bucket` —
+/// the unit twice, once in our spelling and once in the exporter's. Verified
+/// live in VictoriaMetrics 2026-08-12 before the rename, all 6 histogram
+/// series carrying the doubled suffix.
+///
+/// **This rename BREAKS any query using the old names.** Taken deliberately
+/// and early: nothing had been built on them yet (checked — 8 lfm2d series,
+/// no dashboards), and the cost of this only ever grows. If you are reading
+/// this because a query broke, the mapping is
+/// `lfm2d_*_duration_ms_milliseconds_*` → `lfm2d_*_duration_milliseconds_*`.
+const REQUEST_DURATION: &str = "lfm2d.request.duration";
+const INFERENCE_DURATION: &str = "lfm2d.inference.duration";
+
 /// Request counter + duration histogram, recorded once per HTTP response by
 /// `server`'s telemetry middleware.
 pub fn record_request(route: &str, method: &str, status: u16, elapsed: Duration) {
@@ -205,7 +222,7 @@ pub fn record_request(route: &str, method: &str, status: u16, elapsed: Duration)
     ];
     meter().u64_counter("lfm2d.requests").with_description("HTTP requests served").build().add(1, &attrs);
     meter()
-        .f64_histogram("lfm2d.request.duration_ms")
+        .f64_histogram(REQUEST_DURATION)
         .with_description("HTTP request duration")
         .with_unit("ms")
         .build()
@@ -218,7 +235,7 @@ pub fn record_request(route: &str, method: &str, status: u16, elapsed: Duration)
 pub fn record_inference_duration(operation: &'static str, elapsed: Duration) {
     let attrs = [KeyValue::new("operation", operation)];
     meter()
-        .f64_histogram("lfm2d.inference.duration_ms")
+        .f64_histogram(INFERENCE_DURATION)
         .with_description("Inference duration by operation kind")
         .with_unit("ms")
         .build()
@@ -243,4 +260,44 @@ pub fn register_queue_depth_gauge(
             observer.observe(queue_depth.load(std::sync::atomic::Ordering::SeqCst) as u64, &[]);
         })
         .build()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The unit belongs in `.with_unit()`, never in the instrument name —
+    /// exporters append it, so spelling it twice produces
+    /// `..._duration_ms_milliseconds_bucket`. That shipped and reached
+    /// VictoriaMetrics before anyone noticed, because nothing in the build
+    /// looks at a metric name.
+    ///
+    /// Deliberately checks SUFFIXES that encode a unit rather than the two
+    /// current names: a new instrument added next year gets this check for
+    /// free, which an equality assertion would not give.
+    #[test]
+    fn instrument_names_do_not_repeat_their_unit() {
+        const UNIT_SUFFIXES: [&str; 8] =
+            ["_ms", "_us", "_ns", "_s", "_bytes", "_seconds", "_milliseconds", "_count"];
+
+        for name in [REQUEST_DURATION, INFERENCE_DURATION] {
+            for suffix in UNIT_SUFFIXES {
+                assert!(
+                    !name.ends_with(suffix),
+                    "instrument {name:?} ends with unit suffix {suffix:?} — the unit belongs \
+                     in .with_unit(), and exporters append it, so this becomes a doubled \
+                     suffix like lfm2d_request_duration_ms_milliseconds_bucket"
+                );
+            }
+        }
+    }
+
+    /// Names are a wire contract for every dashboard and alert. Renaming one
+    /// silently breaks queries with no build error and no runtime error, so
+    /// pin them: this test failing means someone must go update the queries.
+    #[test]
+    fn instrument_names_are_pinned() {
+        assert_eq!(REQUEST_DURATION, "lfm2d.request.duration");
+        assert_eq!(INFERENCE_DURATION, "lfm2d.inference.duration");
+    }
 }
